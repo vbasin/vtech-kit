@@ -49,8 +49,8 @@ agents, MCP servers and development dependencies; Claude's SessionEnd, and Codex
 Grok's Stop (which run every turn), record what is new in `~/.vtech-kit/learning.jsonl`.
 A component already recorded for the repo, by any session on any host, is not recorded
 again. On Grok the first Bash call sets the start inventory if SessionStart did not run.
-Whether a live Grok session runs these hooks is unverified until the learning check in
-`docs/HOST_VALIDATION.md` is run. Sending to the kit repo needs the same two opt-ins on every host. The
+A live Grok 1.0.70 session ran them and recorded a new skill (2026-11-03, see
+`docs/HOST_VALIDATION.md`); Codex's live run is still pending. Sending to the kit repo needs the same two opt-ins on every host. The
 kit's own installed skills and `kit_*` agents are never reported as learned.
 
 For Codex, use the installed `kit_design_critic`, `kit_reviewer`,

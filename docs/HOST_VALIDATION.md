@@ -169,7 +169,7 @@ Relevant evidence files under its `evidence/` directory:
 The earlier `codex-discovery` and `codex-hooks` logs used
 `--ignore-user-config`; retain them as diagnostic evidence of that limitation.
 
-## Learning capture check (pending, added 2026-11-03)
+## Learning capture check (added 2026-11-03; Grok passed, Codex pending)
 
 Tests cover the Codex and Grok capture hooks by calling them directly. What they cannot
 show is whether a live host calls them: Codex's Stop is documented to run every turn, and
@@ -193,3 +193,14 @@ Pass: one line containing `"name": "check-skill"`. No file, or no such line, mea
 host did not run the hooks; record which. For the doubling question on Grok, also run
 `grok inspect` and note whether `SessionStart` and `Stop` are listed twice (once from
 `.grok/hooks/kit.json`, once from a Claude kit plugin).
+
+### Result on Grok 1.0.70 (2026-11-03, V's VM)
+
+Passed. Run headless with `grok --trust --permission-mode acceptEdits --allow 'Write' -p
+"<the prompt above>"` (without `--allow 'Write'` a headless run refuses the write, since it
+cannot ask for approval). The log held one line:
+`{"kind":"component","type":"skill","name":"check-skill","repo":"acme/check","status":"proposed",...}`.
+So a live Grok session runs the native SessionStart and Stop commands. Doubling was settled
+earlier the same day: `grok inspect` did list the Claude plugin's hooks too, and the plugin's
+hooks now stand aside per event (`kit_common.stand_aside`). Codex's live run is still pending
+until its hooks are trusted in the VS Code extension.
