@@ -193,10 +193,14 @@ def recorded(path: Path, repo: str) -> Set[str]:
             if r.get("kind") == "component" and r.get("repo") == repo}
 
 
-FRONTMATTER_DESCRIPTION = re.compile(r"^description:\s*(.*)$", re.MULTILINE)
+# YAML frontmatter (`description: ...`) or a Codex agent's TOML (`description = "..."`).
+FRONTMATTER_DESCRIPTION = re.compile(r"^description\s*[:=]\s*(.*)$", re.MULTILINE)
 DECISIONS = "docs/decisions"
-DECISION_FIELDS = re.compile(r"^-\s*(Task|Binding constraint):\s*(.+)$", re.MULTILINE)
-EXCERPT = 600
+# A field and its indented continuation lines: the logs wrap long fields.
+DECISION_FIELDS = re.compile(r"^-\s*(Task|Binding constraint):\s*(.+(?:\n[ \t]+\S.*)*)", re.MULTILINE)
+# Raw text kept for the backlog, which scrubs it whole and only then cuts it to its own
+# limit: cutting first could split a credential into a piece the scrubber no longer sees.
+RAW_LIMIT = 4000
 
 
 def component_paths(root: Path, entry: str) -> List[Path]:
@@ -218,7 +222,7 @@ def describe(root: Path, entry: str) -> str:
         if found:
             text = found.group(1).strip().strip("'\"|>").strip()
             if text:
-                return text[:EXCERPT]
+                return text[:RAW_LIMIT]
     return ""
 
 
@@ -238,10 +242,10 @@ def decision_context(root: Path, before: Optional[Dict[str, str]]) -> str:
         if before.get(rel) == digest:
             continue
         text = _read(root / rel)
-        fields = "; ".join(f"{k}: {v.strip()}" for k, v in DECISION_FIELDS.findall(text))
+        fields = "; ".join(f"{k}: {' '.join(v.split())}" for k, v in DECISION_FIELDS.findall(text))
         if fields:
             parts.append(f"{Path(rel).stem}: {fields}")
-    return " | ".join(parts)[:EXCERPT]
+    return " | ".join(parts)[:RAW_LIMIT]
 
 
 def start_inventory(root: Path) -> Dict[str, Any]:
@@ -370,11 +374,17 @@ def stop_main(backlog_file: Optional[Path] = None) -> int:
     state = _roots_state(session_id, data.get("cwd"))
     roots = learning_roots(data.get("cwd"))
     asks: List[str] = []
+    # Asked last Stop and still without a reason: send them without one from now on.
+    for ident in state.pop("awaiting", []):
+        backlog.release(path, ident)
+    awaiting: List[str] = []
     for root in roots:
         sub = state["roots"][str(root)]
         for event in capture(root, sub, path, send=False):
             entry = f"{event['type']}:{event['name']}"
             if event["type"] in ("skill", "agent"):
+                backlog.hold(path, event["id"])  # no sync, from any session, sends it yet
+                awaiting.append(event["id"])
                 asks.append(f"- {event['type']} `{event['name']}` in {event['repo'] or root.name}: "
                             f"say why it was needed, in one or two sentences (what you were trying "
                             f"to do or optimize, and what was missing): `python3 {scripts} --file "
@@ -399,7 +409,10 @@ def stop_main(backlog_file: Optional[Path] = None) -> int:
             asks.append(f"- {kind} `{name}` was saved under ~/.claude, where no repo, other machine or "
                         f"learning report sees it. {where}")
     state["user_flagged"] = sorted(seen)
-    if asks and not data.get("stop_hook_active"):
+    # Each thing is asked about once (`reported`, `user_flagged`), so a continuation may ask
+    # about what it has just added, such as a skill moved from ~/.claude into the repo.
+    if asks:
+        state["awaiting"] = awaiting
         save_state(learning_id(session_id), state)
         emit({"decision": "block", "reason": "kit learning (one-time, for what this session added):\n"
               + "\n".join(asks) + "\nThen finish."})
@@ -410,8 +423,7 @@ def stop_main(backlog_file: Optional[Path] = None) -> int:
         if result and NO_ACCESS.search(result.get("error") or ""):
             failed = backlog.report_target(path)
     save_state(learning_id(session_id), state)
-    if failed and os.environ.get("CLAUDE_CODE_REMOTE") == "true" and not state.get("access_asked") \
-            and not data.get("stop_hook_active"):
+    if failed and os.environ.get("CLAUDE_CODE_REMOTE") == "true" and not state.get("access_asked"):
         state["access_asked"] = True
         save_state(learning_id(session_id), state)
         emit({"decision": "block", "reason": (

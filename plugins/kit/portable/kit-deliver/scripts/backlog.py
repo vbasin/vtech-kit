@@ -82,7 +82,7 @@ def read_records(path: Path) -> Dict[str, Dict[str, Any]]:
             event = None
         ident = event.get("id") if isinstance(event, dict) else None
         kind = event.get("kind") if isinstance(event, dict) else None
-        kinds = ("idea", "component", "resolution", "synced", "claim", "why")
+        kinds = ("idea", "component", "resolution", "synced", "claim", "why", "hold", "release")
         if not isinstance(ident, str) or not ident or kind not in kinds:
             skipped += 1
         elif kind in ("idea", "component") and ident not in records:
@@ -97,6 +97,9 @@ def read_records(path: Path) -> Dict[str, Dict[str, Any]]:
         elif kind == "why" and ident in records and not records[ident].get("synced_to") \
                 and isinstance(event.get("text"), str):
             records[ident] = {**records[ident], "why": event["text"]}
+        elif kind in ("hold", "release") and ident in records:
+            records[ident] = {**records[ident],
+                              "held_since": event.get("created_at") if kind == "hold" else None}
         elif kind == "synced" and ident in records:
             records[ident] = {**records[ident], "synced_to": event.get("issue")}
         else:
@@ -159,9 +162,33 @@ def add_why(path: Path, ident: str, text: str) -> Dict[str, Any]:
         raise ValueError("unknown component id")
     if record.get("synced_to"):
         raise ValueError("already sent; the reason was not added")
-    event = {"kind": "why", "id": ident, "text": clean(text)[:CONTEXT_LIMIT], "created_at": now()}
+    event = {"kind": "why", "id": ident, "text": clean(text), "created_at": now()}
     append(path, event)
     return event
+
+
+HOLD_S = 3600  # a hold whose session never released it lapses
+
+
+def hold(path: Path, ident: str) -> None:
+    """Keep a component out of every sync until its reason is given or the asking session
+    releases it: another session's sync must not send it without the reason."""
+    append(path, {"kind": "hold", "id": ident, "created_at": now()})
+
+
+def release(path: Path, ident: str) -> None:
+    append(path, {"kind": "release", "id": ident, "created_at": now()})
+
+
+def held(record: Dict[str, Any]) -> bool:
+    since = record.get("held_since")
+    if not since or record.get("why"):
+        return False
+    try:
+        age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(since)
+    except (TypeError, ValueError):
+        return False
+    return age.total_seconds() < HOLD_S
 
 
 def fingerprint(record: Dict[str, Any]) -> str:
@@ -274,7 +301,7 @@ def sync(path: Path, target: str, repo: str, run: Optional[Runner] = None,
         raise ValueError("--to and --repo must be OWNER/NAME")
     def unsent() -> List[Dict[str, Any]]:
         return [r for r in read_records(path).values()
-                if r.get("repo") == repo and not r.get("synced_to")]
+                if r.get("repo") == repo and not r.get("synced_to") and not held(r)]
 
     pending = unsent()
     result: Dict[str, Any] = {"sent": [], "queued": len(pending), "error": ""}

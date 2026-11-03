@@ -1236,15 +1236,19 @@ def test_stop_asks_why_and_to_commit_then_sends_the_reason_with_the_report(
     add_skill(repo, "trace-repro", "Reproduce a flaky trace deterministically")
     (repo / "docs/decisions/2026-11-03-flaky-traces.md").write_text(
         "# Flaky traces\n- Task: make trace failures reproducible · Done-check: x\n"
-        "- Binding constraint: no network in CI\n")
+        "- Binding constraint: no network in CI,\n  and the runner has no GPU\n")
     out = learn(tmp_path, data_dir, base, "stop")
     assert out["decision"] == "block"
     (entry,) = [r for r in records(tmp_path).values() if r["kind"] == "component"]
     assert entry["context"]["what"] == "Reproduce a flaky trace deterministically"
     assert "make trace failures reproducible" in entry["context"]["decision"]
-    assert "no network in CI" in entry["context"]["decision"] and "older question" not in entry["context"]["decision"]
+    assert "no network in CI, and the runner has no GPU" in entry["context"]["decision"], "lost a wrapped line"
+    assert "older question" not in entry["context"]["decision"]
     assert f"why --id {entry['id']}" in out["reason"] and ".claude/skills/trace-repro" in out["reason"]
     assert not gh_log(tmp_path), "sent before Claude could say why"
+    backlog = backlog_module()
+    assert backlog.sync(tmp_path / "learning.jsonl", "o/kit", "acme/pipeline",
+                        run=lambda a, t: pytest.fail("another session sent a held entry"))["queued"] == 0
 
     backlog_module().add_why(tmp_path / "learning.jsonl", entry["id"], "needed to stop guessing at CI failures")
     assert learn(tmp_path, data_dir, {**base, "stop_hook_active": True}, "stop") == {}
@@ -1292,11 +1296,13 @@ def test_in_a_project_whose_only_repo_is_the_kit_a_reusable_skill_becomes_a_kit_
     assert "no repo of its own" in out["reason"] and "pull request" in out["reason"]
 
 
-@pytest.mark.parametrize("remote,asked", [("true", True), ("", False)])
+@pytest.mark.parametrize("remote,asked,continuing", [("true", True, False), ("", False, False),
+                                                     ("true", True, True)])
 def test_a_cloud_session_without_access_to_the_kit_repo_is_told_how_to_get_it(
-        repo: Path, data_dir: Path, tmp_path: Path, remote: str, asked: bool) -> None:
+        repo: Path, data_dir: Path, tmp_path: Path, remote: str, asked: bool, continuing: bool) -> None:
+    """Also on a continuation: a new skill's ask blocks first, so sending happens on one."""
     opt_in(repo, tmp_path)
-    base = {"session_id": f"access-{remote}", "cwd": str(repo)}
+    base = {"session_id": f"access-{remote}", "cwd": str(repo), "stop_hook_active": continuing}
     learn(tmp_path, data_dir, base, "start")
     (repo / "requirements-dev.txt").write_text("pytest\n")  # a dependency: nothing to ask
     # What gh prints in a claude.ai cloud session for a repo not attached to it.
@@ -1321,3 +1327,46 @@ def test_issue_listing_reads_paginated_json_lines() -> None:
     backlog = backlog_module()
     assert backlog._issues('{"number": 1}\n{"number": 2}\n') == [{"number": 1}, {"number": 2}]
     assert backlog._issues('[{"number": 3}]') == [{"number": 3}]
+
+
+def test_a_reason_never_given_releases_the_report_on_the_next_stop(
+        repo: Path, data_dir: Path, tmp_path: Path) -> None:
+    opt_in(repo, tmp_path)
+    base = {"session_id": "release-1", "cwd": str(repo)}
+    learn(tmp_path, data_dir, base, "start")
+    add_skill(repo, "trace-repro", "x")
+    assert learn(tmp_path, data_dir, base, "stop")["decision"] == "block"
+    learn(tmp_path, data_dir, {**base, "stop_hook_active": True}, "stop")
+    assert '"title": "[kit-learning] skill: trace-repro"' in gh_log(tmp_path), "held for good"
+
+
+def test_a_skill_moved_in_on_a_continuation_is_still_asked_about(
+        repo: Path, data_dir: Path, tmp_path: Path) -> None:
+    opt_in(repo, tmp_path)
+    base = {"session_id": "move-1", "cwd": str(repo)}
+    learn(tmp_path, data_dir, base, "start")
+    add_skill(tmp_path / "home", "helper")
+    assert "saved under ~/.claude" in learn(tmp_path, data_dir, base, "stop")["reason"]
+    add_skill(repo, "helper", "Help")  # Claude moved it, answering the block
+    out = learn(tmp_path, data_dir, {**base, "stop_hook_active": True}, "stop")
+    assert "why --id" in out["reason"] and not gh_log(tmp_path)
+
+
+def test_context_is_scrubbed_whole_before_it_is_cut(tmp_path: Path) -> None:
+    """Cut first, a token straddling the limit loses a character and the scrubber misses it."""
+    backlog = backlog_module()
+    learning = tmp_path / "learning.jsonl"
+    token = "f" * 40
+    entry = backlog.add_component(learning, "skill", "s", "acme/pipeline",
+                                  {"what": "x" * (backlog.CONTEXT_LIMIT - 10) + token})
+    assert "fffff" not in entry["context"]["what"]
+    backlog.add_why(learning, entry["id"], "y" * (backlog.CONTEXT_LIMIT - 10) + " " + token)
+    assert "fffff" not in backlog._occurrence(backlog.read_records(learning)[entry["id"]])
+
+
+def test_a_codex_agent_reports_its_toml_description(repo: Path) -> None:
+    sys.path.insert(0, str(SCRIPTS))
+    import learning_report
+    (repo / ".codex/agents").mkdir(parents=True)
+    (repo / ".codex/agents/sql_checker.toml").write_text('name = "sql_checker"\ndescription = "Check SQL"\n')
+    assert learning_report.describe(repo, "agent:sql_checker") == "Check SQL"
