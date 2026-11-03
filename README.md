@@ -83,7 +83,8 @@ A repo points `deliver` at its own gates and reviewers in `.claude/kit.json`:
 | PreToolUse (Bash) | `bash_guard.py` | Asks before `DROP`/`TRUNCATE`/`DELETE` without `WHERE`/chunk operations, before full-suite pytest runs (opt-in), and before repo-specific patterns |
 | PostToolUse (Edit/Write) | `post_edit.py` | Remembers the edited file and lints it at once |
 | Stop | `stop_verify.py` | Lints the session's changed `.py` files and runs the tests related to them, as explicit paths: their own test files and every test whose imports reach them, nearest first, up to `tests.max_files`. On failure it sends the output back so Claude keeps working. Gaps it cannot close (files no gate covers, tests left out by the cap) are shown to you once and do not block. A diff that already passed is not re-run on the next turn. If Claude stops again with the same failure, it lets the stop through with a notice, so a pre-existing failure can't trap a session |
-| SessionEnd | `learning_report.py` | Records the skills, agents, MCP servers and development tools the session added, and sends the repo's queued learning to the kit repo when both the machine and the repo opt in (see below) |
+| Stop | `learning_report.py stop` | Records the skills, agents, MCP servers and development tools this turn added, with what each is for and the decision log written for it. Once per new skill or agent, it asks Claude why it was needed and to commit it, and it asks Claude to move a skill or agent saved only under `~/.claude` into the repo. Then it sends the repo's queue when both the machine and the repo opt in (see below). A cloud container can be discarded without a SessionEnd, so this is where a cloud session reports |
+| SessionEnd | `learning_report.py` | The same capture and send, for anything the last turn left |
 
 Related tests are found through the repo's own import graph, so a test of `b.py` still runs when `a.py`, which `b` imports, changed. Deleted files are included. Each run starts with an empty bytecode cache, and an interpreter without pytest counts as a failure rather than a pass. `tests.scope: "all"` runs every test file instead, for a repo whose whole suite is cheap. In a large repo many edits reach most of the suite through shared modules (in ML_analytics, editing `src/common/config.py` reaches 162 of 180 test files), so there the cap is what keeps the hook fast and `verification.gates` is the better tool: the repo says what covers what instead of the hook inferring it. A repo can add guard patterns in `.claude/kit.json`:
 
@@ -169,13 +170,18 @@ with the user's privileges. The manual verifier and Stop hook use the same gate 
 Repos that use the kit send what they learned back here, so it can become a PR.
 
 1. **Capture, in each repo, automatically, on Claude Code, Codex and Grok.** Claude Code's
-   `learning_report.py` SessionEnd hook, and the Stop hooks `install_native.py` writes for
+   `learning_report.py` Stop and SessionEnd hooks, and the Stop hooks `install_native.py` writes for
    Codex and Grok, compare the repo's skills, agents, MCP servers and development dependencies (groups named dev, test, lint, docs and the like,
    `devDependencies`, `requirements-dev*.txt`) with what was there at SessionStart, and
-   records what is new. Runtime dependencies are not recorded. Claude records improvement
-   ideas with `backlog.py add` as it works. Entries hold the repo name, the kind of thing,
-   its name and, for ideas, a few lines of text with anything that looks like a credential
-   or a home-directory path redacted before sending. They queue in
+   records what is new. Runtime dependencies are not recorded. A session that starts above
+   its checkouts, as a claude.ai cloud session does in the home folder, covers each repo
+   beneath it. Claude records improvement ideas with `backlog.py add` as it works. Entries
+   hold the repo name, the kind of thing and its name. A skill or agent also carries why it
+   exists, so `improve` knows what was being optimized and what the kit lacked: its own
+   description, the task and binding constraint of any `docs/decisions/` log the session
+   wrote, and a one-or-two-sentence reason Claude gives when the Stop hook asks
+   (`backlog.py why`). Ideas carry a few lines of text. All free text is cut short, and
+   anything that looks like a credential or a home-directory path is redacted before sending. They queue in
    `~/.vtech-kit/learning.jsonl` on that machine (`KIT_LEARNING_FILE` moves it).
 2. **Send, when the machine and the repo both opt in.** The machine names the kit repo once;
    the repo's `.claude/kit.json` consents with `"learning": {"share": true}` (the template
@@ -184,6 +190,10 @@ Repos that use the kit send what they learned back here, so it can become a PR.
    entries. They go as issues labelled `kit-learning`; the same gap from another repo is a
    comment on the existing issue (reopening it if it was closed), so the number of repos on
    an issue is how often it recurs. Offline or signed out, entries wait for the next session.
+   Sending uses GitHub's REST API only (`gh api`), because claude.ai cloud sessions refuse
+   GraphQL, which every `gh issue` command uses. A cloud session can reach only the repos
+   attached to it: when the kit repo is not one of them, the Stop hook asks Claude once to
+   attach it (`add_repo`) and send again.
 3. **Improve, here.** In this repo, `/kit:improve` reads the open `kit-learning` issues,
    starts with the one the most repos reported, builds and scores a candidate, and opens a
    PR that closes the issue. Nothing merges without you.
@@ -201,6 +211,21 @@ Turning sending on, once per machine (the VM, your laptop), in a terminal:
 3. Any time later, the same line with `status` in place of `target vbasin/vtech-kit` shows
    what is queued per repo and how the last send went; with `target ""` it stops sending
    from this machine.
+
+In claude.ai cloud sessions (Claude projects and Claude Code on the web) each session gets
+a fresh container, so the plugin and the target are set by the cloud environment's setup
+script. It runs before every session, including in a project with no repo of its own:
+
+```bash
+claude plugin marketplace add vbasin/vtech-kit || true
+claude plugin install kit@vtech-kit --scope user || true
+python3 "$(find ~/.claude/plugins -path '*kit-deliver/scripts/backlog.py' | head -1)" target vbasin/vtech-kit || true
+```
+
+The repo still consents with `learning.share`. A cloud session sends only when the kit
+repo is attached to it. In a project whose only repo is the kit, a new reusable skill
+belongs in the kit as a pull request, which the Stop hook's prompt to save it in a repo
+leads to.
 
 A repo adopted before this change needs `"learning": {"share": true}` added to its
 `.claude/kit.json`. SessionEnd reports only what a session adds, so what a repo built

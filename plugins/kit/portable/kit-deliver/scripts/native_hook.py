@@ -47,7 +47,7 @@ def begin(host: str, data: Dict[str, Any]) -> Path:
         state["edited"] = []
         if learning_report is not None and learning_report.backlog is not None:
             with contextlib.suppress(Exception):  # without an inventory nothing is captured
-                state["components"] = learning_report.inventory(root)
+                state.update(learning_report.start_inventory(root))
         save_state(sid, state)
     return root
 

@@ -26,13 +26,15 @@ Prints nothing and never fails the session.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from kit_common import git, load_config, load_state, read_input, repo_root, save_state
+from kit_common import emit, git, load_config, load_state, read_input, repo_root, save_state
 
 PLUGIN = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN / "portable" / "kit-deliver" / "scripts"))
@@ -191,39 +193,232 @@ def recorded(path: Path, repo: str) -> Set[str]:
             if r.get("kind") == "component" and r.get("repo") == repo}
 
 
-def capture(root: Path, state: Dict[str, Any], path: Path, budget_s: float = 40.0) -> None:
-    """Record what this session added since its SessionStart inventory, then send the repo's
-    queue if both opt-ins hold. Shared by every host's end-of-session (or end-of-turn) hook:
-    Claude's SessionEnd here, Codex's and Grok's Stop in `native_hook.py`. Safe to repeat:
-    what this session or any other already recorded for the repo is skipped. Updates `state`;
-    the caller saves it."""
+FRONTMATTER_DESCRIPTION = re.compile(r"^description:\s*(.*)$", re.MULTILINE)
+DECISIONS = "docs/decisions"
+DECISION_FIELDS = re.compile(r"^-\s*(Task|Binding constraint):\s*(.+)$", re.MULTILINE)
+EXCERPT = 600
+
+
+def component_paths(root: Path, entry: str) -> List[Path]:
+    """Where a skill or agent of the inventory lives in the repo (none for the others)."""
+    kind, name = entry.split(":", 1)
+    if kind == "skill":
+        return [root / host / "skills" / name for host in (".claude", ".agents", ".grok")
+                if (root / host / "skills" / name / "SKILL.md").exists()]
+    if kind == "agent":
+        return [p for p in (root / ".claude" / "agents" / f"{name}.md",
+                            root / ".codex" / "agents" / f"{name}.toml") if p.exists()]
+    return []
+
+
+def describe(root: Path, entry: str) -> str:
+    """The component's own one-line description from its frontmatter: what it is for."""
+    for path in component_paths(root, entry):
+        found = FRONTMATTER_DESCRIPTION.search(_read(path / "SKILL.md" if path.is_dir() else path))
+        if found:
+            text = found.group(1).strip().strip("'\"|>").strip()
+            if text:
+                return text[:EXCERPT]
+    return ""
+
+
+def decision_digests(root: Path) -> Dict[str, str]:
+    """Digest of every decision log, so the end of a session sees which ones it wrote."""
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+            for p in sorted((root / DECISIONS).glob("*.md"))[:500] if p.is_file()}
+
+
+def decision_context(root: Path, before: Optional[Dict[str, str]]) -> str:
+    """Task and binding constraint of the decision logs this session wrote or changed:
+    why the component was sought and what settled the design. None known at start: none."""
+    if before is None:
+        return ""
+    parts = []
+    for rel, digest in decision_digests(root).items():
+        if before.get(rel) == digest:
+            continue
+        text = _read(root / rel)
+        fields = "; ".join(f"{k}: {v.strip()}" for k, v in DECISION_FIELDS.findall(text))
+        if fields:
+            parts.append(f"{Path(rel).stem}: {fields}")
+    return " | ".join(parts)[:EXCERPT]
+
+
+def start_inventory(root: Path) -> Dict[str, Any]:
+    """What a session's end is compared with."""
+    return {"components": inventory(root), "decisions": decision_digests(root)}
+
+
+def capture(root: Path, state: Dict[str, Any], path: Path, budget_s: float = 40.0,
+            send: bool = True) -> List[Dict[str, Any]]:
+    """Record what this session added since its start inventory, with what context there is,
+    then send the repo's queue if both opt-ins hold and `send`. Shared by every host's
+    end-of-session (or end-of-turn) hook: Claude's SessionEnd and Stop here, Codex's and
+    Grok's Stop in `native_hook.py`. Safe to repeat: what this session or any other already
+    recorded for the repo is skipped. Updates `state`; the caller saves it. Returns the
+    entries recorded now."""
     repo = backlog.repo_slug(root)
+    made: List[Dict[str, Any]] = []
     if isinstance(state.get("components"), list):  # absent: started before this hook existed
         before = set(state["components"]) | set(state.get("reported", []))
         added = [e for e in inventory(root) if e not in before]
         if added:
             known = recorded(path, repo)
+            decision = decision_context(root, state.get("decisions"))
             for entry in added:
                 if entry not in known:
                     kind, name = entry.split(":", 1)
-                    backlog.add_component(path, kind, name, repo)
+                    made.append(backlog.add_component(
+                        path, kind, name, repo, {"what": describe(root, entry), "decision": decision}))
         state["reported"] = sorted(set(state.get("reported", [])) | set(added))
+    if send:
+        send_repo(root, path, budget_s)
+    return made
+
+
+def send_repo(root: Path, path: Path, budget_s: float = 40.0) -> Optional[Dict[str, Any]]:
+    """Send this repo's queue when the machine names a target and the repo consents."""
+    repo = backlog.repo_slug(root)
     learning = load_config(root).get("learning")
     target = backlog.report_target(path)
     if isinstance(learning, dict) and learning.get("share") is True and repo and target \
             and repo.lower() != target.lower():  # the kit repo does not report to itself
-        backlog.sync(path, target, repo, budget_s=budget_s)
+        return backlog.sync(path, target, repo, budget_s=budget_s)
+    return None
+
+
+def learning_roots(cwd: Optional[str]) -> List[Path]:
+    """The repo the session runs in; or, when it runs above its checkouts (a claude.ai cloud
+    session starts in the home folder with each repo cloned beneath it), those checkouts."""
+    root = repo_root(cwd)
+    if root is not None:
+        return [root]
+    base = Path(cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+    try:
+        children = sorted(p for p in base.iterdir() if p.is_dir() and (p / ".git").exists())
+    except OSError:
+        return []
+    return [p for p in (repo_root(str(c)) for c in children[:50]) if p is not None][:10]
+
+
+def user_inventory() -> List[str]:
+    """Skills and agents saved for the user rather than in a repo: they reach no repo, no
+    other machine and no learning report, and a cloud container discards them."""
+    home = Path.home() / ".claude"
+    found = {f"skill:{p.parent.name}" for p in (home / "skills").glob("*/SKILL.md")}
+    found.update(f"agent:{p.stem}" for p in (home / "agents").glob("*.md"))
+    return sorted(found)
+
+
+def learning_id(session_id: str) -> str:
+    # Its own state file: the Stop verifier saves the session's file in parallel with this hook.
+    return f"{session_id}-learning"
+
+
+def begin(session_id: str, cwd: Optional[str]) -> None:
+    """SessionStart: the start inventory of every root, and of the user's own folders."""
+    sid = learning_id(session_id)
+    state = load_state(sid)
+    if state.get("roots") is not None:  # resume / compact: keep the original inventory
+        return
+    state["roots"] = {str(r): start_inventory(r) for r in learning_roots(cwd)}
+    state["user"] = user_inventory()
+    save_state(sid, state)
+
+
+def _roots_state(session_id: str, cwd: Optional[str]) -> Dict[str, Any]:
+    state = load_state(learning_id(session_id))
+    roots = state.setdefault("roots", {})
+    for root in learning_roots(cwd):
+        if str(root) not in roots:
+            # Started before this hook existed, or cloned mid-session: its inventory from now.
+            old = load_state(session_id)
+            roots[str(root)] = ({"components": old["components"], "reported": old.get("reported", [])}
+                                if isinstance(old.get("components"), list) and repo_root(cwd) == root
+                                else start_inventory(root))
+    return state
 
 
 def main(backlog_file: Optional[Path] = None) -> int:
+    """SessionEnd: record and send. Nothing to ask: the session is over."""
     data: Dict[str, Any] = read_input()
     session_id = str(data.get("session_id") or "")
-    root = repo_root(data.get("cwd"))
-    if root is None or not session_id or backlog is None:
+    if not session_id or backlog is None:
         return 0
-    state = load_state(session_id)
-    capture(root, state, backlog_file or backlog.DEFAULT)
-    save_state(session_id, state)
+    path = backlog_file or backlog.DEFAULT
+    state = _roots_state(session_id, data.get("cwd"))
+    for root in learning_roots(data.get("cwd")):
+        capture(root, state["roots"][str(root)], path)
+    save_state(learning_id(session_id), state)
+    return 0
+
+
+NO_ACCESS = re.compile(r"not enabled for this session|Resource not accessible|HTTP 40[34]", re.IGNORECASE)
+
+
+def stop_main(backlog_file: Optional[Path] = None) -> int:
+    """Stop: record what this turn added, then, once per thing, ask Claude for what only it
+    knows or can do: why the component was needed, and saving it where it lasts. Sends on
+    the next Stop, so the reason goes out with the report. A cloud container may be
+    discarded without a SessionEnd, so this is where a cloud session reports."""
+    data: Dict[str, Any] = read_input()
+    session_id = str(data.get("session_id") or "")
+    if not session_id or backlog is None:
+        return 0
+    path = backlog_file or backlog.DEFAULT
+    scripts = PLUGIN / "portable" / "kit-deliver" / "scripts" / "backlog.py"
+    state = _roots_state(session_id, data.get("cwd"))
+    roots = learning_roots(data.get("cwd"))
+    asks: List[str] = []
+    for root in roots:
+        sub = state["roots"][str(root)]
+        for event in capture(root, sub, path, send=False):
+            entry = f"{event['type']}:{event['name']}"
+            if event["type"] in ("skill", "agent"):
+                asks.append(f"- {event['type']} `{event['name']}` in {event['repo'] or root.name}: "
+                            f"say why it was needed, in one or two sentences (what you were trying "
+                            f"to do or optimize, and what was missing): `python3 {scripts} --file "
+                            f"{path} why --id {event['id']} --text \"...\"`")
+            dirty = [p for p in component_paths(root, entry)
+                     if git(["status", "--porcelain", "--", str(p)], root)]
+            if dirty:
+                rels = " ".join(str(p.relative_to(root)) for p in dirty)
+                asks.append(f"- `{rels}` is not committed in {root.name}: commit it (explicit paths), "
+                            "so it outlasts this session and reaches other machines.")
+    seen = set(state.setdefault("user_flagged", []))
+    target = backlog.report_target(path).lower()
+    own = [r for r in roots if backlog.repo_slug(r).lower() != target] if target else roots
+    for entry in user_inventory():
+        if entry not in set(state.get("user", [])) | seen:
+            seen.add(entry)
+            kind, name = entry.split(":", 1)
+            where = (f"Save it in the repo ({', '.join(r.name for r in own)}) under `.claude/{kind}s/` "
+                     "and commit it." if own else
+                     "This session has no repo of its own: if it is reusable beyond this project, add "
+                     "it to the kit repo as a pull request; otherwise say where you kept it.")
+            asks.append(f"- {kind} `{name}` was saved under ~/.claude, where no repo, other machine or "
+                        f"learning report sees it. {where}")
+    state["user_flagged"] = sorted(seen)
+    if asks and not data.get("stop_hook_active"):
+        save_state(learning_id(session_id), state)
+        emit({"decision": "block", "reason": "kit learning (one-time, for what this session added):\n"
+              + "\n".join(asks) + "\nThen finish."})
+        return 0
+    failed = ""
+    for root in roots:
+        result = send_repo(root, path, budget_s=40.0)
+        if result and NO_ACCESS.search(result.get("error") or ""):
+            failed = backlog.report_target(path)
+    save_state(learning_id(session_id), state)
+    if failed and os.environ.get("CLAUDE_CODE_REMOTE") == "true" and not state.get("access_asked") \
+            and not data.get("stop_hook_active"):
+        state["access_asked"] = True
+        save_state(learning_id(session_id), state)
+        emit({"decision": "block", "reason": (
+            f"kit learning could not reach {failed}: this cloud session has no GitHub access to it. "
+            f"Request it (the add_repo tool, repository {failed}, push access), then run "
+            f"`python3 {scripts} --file {path} sync --repo <OWNER/NAME of the repo with queued "
+            "entries>`. If access is refused, say so in one line and finish.")})
     return 0
 
 
@@ -268,6 +463,6 @@ if __name__ == "__main__":
         print(json.dumps(outcome, indent=2))
         sys.exit(1 if outcome.get("error") else 0)
     try:
-        sys.exit(main())
+        sys.exit(stop_main() if sys.argv[1:2] == ["stop"] else main())
     except Exception:  # noqa: BLE001 — a hook must never break the session
         sys.exit(0)

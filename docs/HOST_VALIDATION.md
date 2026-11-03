@@ -205,3 +205,15 @@ not show which hook set the start inventory, SessionStart or the first-Bash-call
 earlier the same day: `grok inspect` did list the Claude plugin's hooks too, and the plugin's
 hooks now stand aside per event (`kit_common.stand_aside`). Codex's hooks were trusted in the VS Code extension the
 same day; only its live run is still pending.
+
+## Cloud session learning check (2026-11-03, claude.ai cloud container)
+
+Passed. Claude Code 2.1.317, the kit loaded with `--plugin-dir` from this branch, a headless
+session started in a folder *above* a fresh checkout (the cloud layout), asked to create
+`.claude/skills/site-audit/SKILL.md`. The learning log recorded the skill with
+`context.what` from its description; the Stop hook asked for the reason and to commit; the
+session ran `backlog.py why` ("the project had no skill covering site auditing...") and
+committed the skill by explicit path. Separately, the REST listing `gh api
+repos/vbasin/vtech-kit/issues?labels=kit-learning...` and the label lookup returned the
+real issues from the same container, where `gh issue list` is refused (GraphQL). Not run
+live: creating an issue, which would have posted to the real kit repo.

@@ -3,8 +3,11 @@
 Two kinds of entry share one append-only log (default `~/.vtech-kit/learning.jsonl`):
 an *idea* Claude records when it sees an improvement worth evaluating later, and a
 *component* the SessionEnd hook records when a session added a skill, agent, MCP server
-or dependency. Each carries the repo it came from. Nothing else is stored: no file
-contents, no paths outside the kit's own folders, no secrets.
+or dependency. Each carries the repo it came from. A component may also carry short,
+scrubbed context: the skill's own description, an excerpt of the decision log written in
+the same session, and a *why* note (what was being optimized, what the kit lacked) that
+Claude adds when the Stop hook asks. Nothing else is stored: no file contents, no paths
+outside the kit's own folders, no secrets.
 
 `sync` posts one repo's unsent entries to the kit repo as GitHub issues labelled
 `kit-learning`, one issue per distinct gap or component. Only entries recorded in the repo
@@ -15,6 +18,7 @@ ranks by. Entries that fail to send stay queued for the next sync.
 
 Usage: backlog.py [--file PATH] add --task TEXT --idea TEXT --evidence TEXT [--repo OWNER/NAME]
        backlog.py [--file PATH] add-component --type TYPE --name NAME --repo OWNER/NAME
+       backlog.py [--file PATH] why --id ID --text TEXT
        backlog.py [--file PATH] list
        backlog.py [--file PATH] resolve --id ID --status STATUS --evidence TEXT
        backlog.py [--file PATH] target [OWNER/NAME]
@@ -33,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -77,7 +82,7 @@ def read_records(path: Path) -> Dict[str, Dict[str, Any]]:
             event = None
         ident = event.get("id") if isinstance(event, dict) else None
         kind = event.get("kind") if isinstance(event, dict) else None
-        kinds = ("idea", "component", "resolution", "synced", "claim")
+        kinds = ("idea", "component", "resolution", "synced", "claim", "why")
         if not isinstance(ident, str) or not ident or kind not in kinds:
             skipped += 1
         elif kind in ("idea", "component") and ident not in records:
@@ -89,6 +94,9 @@ def read_records(path: Path) -> Dict[str, Dict[str, Any]]:
                 and isinstance(event.get("repo"), str) and SLUG.fullmatch(event["repo"]):
             # An entry recorded before entries carried a repo, assigned to one by hand.
             records[ident] = {**records[ident], "repo": event["repo"]}
+        elif kind == "why" and ident in records and not records[ident].get("synced_to") \
+                and isinstance(event.get("text"), str):
+            records[ident] = {**records[ident], "why": event["text"]}
         elif kind == "synced" and ident in records:
             records[ident] = {**records[ident], "synced_to": event.get("issue")}
         else:
@@ -121,15 +129,37 @@ def now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def add_component(path: Path, component_type: str, name: str, repo: str) -> Dict[str, Any]:
+CONTEXT_KEYS = ("what", "decision")  # what the component is for; the decision log behind it
+CONTEXT_LIMIT = 600
+
+
+def add_component(path: Path, component_type: str, name: str, repo: str,
+                  context: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     if component_type not in COMPONENT_TYPES:
         raise ValueError(f"component type must be one of {', '.join(COMPONENT_TYPES)}")
     if not NAME.fullmatch(name):
         raise ValueError("component name must be a plain identifier")
     if repo and not SLUG.fullmatch(repo):
         raise ValueError("repo must be OWNER/NAME")
-    event = {"kind": "component", "id": uuid.uuid4().hex, "type": component_type, "name": name,
-             "repo": repo, "status": "proposed", "created_at": now()}
+    event: Dict[str, Any] = {"kind": "component", "id": uuid.uuid4().hex, "type": component_type,
+                             "name": name, "repo": repo, "status": "proposed", "created_at": now()}
+    kept = {k: scrub(" ".join(str(v).split()))[:CONTEXT_LIMIT] for k, v in (context or {}).items()
+            if k in CONTEXT_KEYS and isinstance(v, str) and v.strip()}
+    if kept:
+        event["context"] = kept
+    append(path, event)
+    return event
+
+
+def add_why(path: Path, ident: str, text: str) -> Dict[str, Any]:
+    """Why an unsent component was needed: what was being optimized, what the kit lacked.
+    Written by Claude when the Stop hook asks; merged into the report before it is sent."""
+    record = read_records(path).get(ident)
+    if not record or record.get("kind") != "component":
+        raise ValueError("unknown component id")
+    if record.get("synced_to"):
+        raise ValueError("already sent; the reason was not added")
+    event = {"kind": "why", "id": ident, "text": clean(text)[:CONTEXT_LIMIT], "created_at": now()}
     append(path, event)
     return event
 
@@ -168,8 +198,15 @@ def scrub(text: Any) -> str:
 def _occurrence(record: Dict[str, Any]) -> str:
     repo = record.get("repo") or "an unnamed repo"
     if record.get("kind") == "component":
-        return (f"- **{repo}** added {record.get('type')} `{record.get('name')}` "
+        line = (f"- **{repo}** added {record.get('type')} `{record.get('name')}` "
                 f"({str(record.get('created_at', ''))[:10]})")
+        context = record.get("context") if isinstance(record.get("context"), dict) else {}
+        for label, value in (("What it is for", context.get("what")),
+                             ("Why it was needed", record.get("why")),
+                             ("Decision log", context.get("decision"))):
+            if isinstance(value, str) and value:
+                line += f"\n  {label}: {scrub(value)[:CONTEXT_LIMIT]}"
+        return line
     return (f"- **{repo}** ({str(record.get('created_at', ''))[:10]}): {scrub(record.get('idea'))}\n"
             f"  During: {scrub(record.get('task'))}\n  Evidence: {scrub(record.get('evidence'))}")
 
@@ -273,15 +310,18 @@ def _send(path: Path, target: str, pending: List[Dict[str, Any]], run: Runner, d
         return run(args, min(15.0, left)) if left > 5 else None
 
     try:
-        listed = call(["issue", "list", "-R", target, "--label", LABEL, "--state", "all",
-                       "--limit", "1000", "--json", "number,body,url,state"])
+        # REST only: Claude Code's cloud sessions refuse GitHub's GraphQL API, which every
+        # `gh issue` subcommand uses.
+        listed = call(["api", f"repos/{target}/issues?labels={LABEL}&state=all&per_page=100",
+                       "--paginate", "--jq",
+                       ".[] | select(.pull_request == null) | {number, body, state, url: .html_url}"])
         if listed is None or listed.returncode != 0:
             # Not knowing which issues exist is not knowing that none do: creating now
             # could split one gap across two issues. Leave everything queued.
-            result["error"] = ((listed.stderr if listed else "") or "gh issue list failed").strip()[:300]
+            result["error"] = ((listed.stderr if listed else "") or "listing issues failed").strip()[:300]
             return
         known = {}
-        for issue in json.loads(listed.stdout or "[]"):
+        for issue in _issues(listed.stdout or ""):
             found = re.search(r"<!-- kit-learning:([0-9a-f]{12}) -->", issue.get("body") or "")
             if found:
                 known[found.group(1)] = issue
@@ -292,15 +332,16 @@ def _send(path: Path, target: str, pending: List[Dict[str, Any]], run: Runner, d
             if issue:
                 if str(issue.get("state", "")).upper() == "CLOSED":
                     # A new report is new evidence: put it back in front of `improve`.
-                    reopened = call(["issue", "reopen", str(issue["number"]), "-R", target])
+                    reopened = call(["api", "-X", "PATCH", f"repos/{target}/issues/{issue['number']}",
+                                     "-f", "state=open"])
                     if reopened is None or reopened.returncode != 0:
                         # A comment on an issue that stays closed is never seen: keep it queued.
                         reason = (reopened.stderr if reopened else "") or "gh issue reopen failed"
                         result["error"] = reason.strip()[:300]
                         return
                     issue["state"] = "OPEN"
-                done = call(["issue", "comment", str(issue["number"]), "-R", target,
-                             "--body", "Reported again:\n" + _occurrence(record)])
+                done = call(["api", f"repos/{target}/issues/{issue['number']}/comments",
+                             "-f", "body=Reported again:\n" + _occurrence(record)])
                 url = issue.get("url") or f"#{issue['number']}"
             else:
                 if not labelled:  # listing a missing label succeeds empty; creating with it fails
@@ -322,8 +363,16 @@ def _send(path: Path, target: str, pending: List[Dict[str, Any]], run: Runner, d
                 body = (f"{_marker(fp)}\nReported automatically by a repo that uses the kit. "
                         "Each comment is another report; the number of distinct repos named "
                         f"here is how often this recurs.\n\n{_occurrence(record)}")
-                done = call(["issue", "create", "-R", target, "--title", _title(record),
-                             "--body", body, "--label", LABEL])
+                # A JSON body file, not `-f labels[]=`: older gh builds cannot send arrays.
+                with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                                 encoding="utf-8") as spec:
+                    json.dump({"title": _title(record), "body": body, "labels": [LABEL]}, spec)
+                try:
+                    done = call(["api", f"repos/{target}/issues", "--input", spec.name,
+                                 "--jq", ".html_url"])
+                finally:
+                    with contextlib.suppress(OSError):
+                        os.unlink(spec.name)
                 lines = (done.stdout or "").strip().splitlines() if done else []
                 url = next((ln for ln in reversed(lines) if "/issues/" in ln), "")
                 if url:
@@ -340,6 +389,15 @@ def _send(path: Path, target: str, pending: List[Dict[str, Any]], run: Runner, d
         result["error"] = f"{type(exc).__name__}: {exc}"[:300]
 
 
+def _issues(text: str) -> List[Dict[str, Any]]:
+    """`gh api --paginate --jq` prints one object per line; a JSON array is read too."""
+    text = text.strip()
+    if text.startswith("["):
+        found = json.loads(text)
+        return [i for i in found if isinstance(i, dict)] if isinstance(found, list) else []
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--file", type=Path, default=DEFAULT)
@@ -353,6 +411,9 @@ def main() -> int:
     comp.add_argument("--type", required=True, choices=COMPONENT_TYPES)
     comp.add_argument("--name", required=True)
     comp.add_argument("--repo", default=None)
+    why = sub.add_parser("why", help="say why an unsent component was needed")
+    why.add_argument("--id", required=True)
+    why.add_argument("--text", required=True)
     sub.add_parser("list")
     resolve = sub.add_parser("resolve")
     resolve.add_argument("--id", required=True)
@@ -392,6 +453,9 @@ def main() -> int:
             return 0
         if args.action == "list":
             print(json.dumps(list(records.values()), indent=2))
+            return 0
+        if args.action == "why":
+            print(json.dumps(add_why(args.file, args.id, args.text)))
             return 0
         if args.action == "add-component":
             print(json.dumps(add_component(args.file, args.type, args.name,
