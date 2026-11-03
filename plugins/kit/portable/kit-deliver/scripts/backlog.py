@@ -146,7 +146,7 @@ def _marker(fp: str) -> str:
 def _title(record: Dict[str, Any]) -> str:
     if record.get("kind") == "component":
         return f"[kit-learning] {record.get('type')}: {record.get('name')}"
-    return "[kit-learning] idea: " + str(record.get("idea", ""))[:80]
+    return "[kit-learning] idea: " + scrub(record.get("idea", ""))[:80]
 
 
 SECRETS = re.compile(
@@ -230,8 +230,11 @@ def sync(path: Path, target: str, repo: str, run: Optional[Runner] = None,
     the outcome is kept in `sync-status.json` next to the log (`backlog.py status`)."""
     if not SLUG.fullmatch(target) or not SLUG.fullmatch(repo):
         raise ValueError("--to and --repo must be OWNER/NAME")
-    pending = [r for r in read_records(path).values()
-               if r.get("repo") == repo and not r.get("synced_to")]
+    def unsent() -> List[Dict[str, Any]]:
+        return [r for r in read_records(path).values()
+                if r.get("repo") == repo and not r.get("synced_to")]
+
+    pending = unsent()
     result: Dict[str, Any] = {"sent": [], "queued": len(pending), "error": ""}
     if not pending:
         return result
@@ -245,7 +248,9 @@ def sync(path: Path, target: str, repo: str, run: Optional[Runner] = None,
         result["error"] = "another sync is running; entries stay queued"
     else:
         try:
-            _send(path, target, pending, run, time.monotonic() + budget_s, result)
+            pending = unsent()  # re-read under the lock: a sync that just finished sent some
+            if pending:
+                _send(path, target, pending, run, time.monotonic() + budget_s, result)
         finally:
             lock.unlink()
     result["queued"] = len(pending) - len(result["sent"])
@@ -282,7 +287,12 @@ def _send(path: Path, target: str, pending: List[Dict[str, Any]], run: Runner, d
             if issue:
                 if str(issue.get("state", "")).upper() == "CLOSED":
                     # A new report is new evidence: put it back in front of `improve`.
-                    call(["issue", "reopen", str(issue["number"]), "-R", target])
+                    reopened = call(["issue", "reopen", str(issue["number"]), "-R", target])
+                    if reopened is None or reopened.returncode != 0:
+                        # A comment on an issue that stays closed is never seen: keep it queued.
+                        reason = (reopened.stderr if reopened else "") or "gh issue reopen failed"
+                        result["error"] = reason.strip()[:300]
+                        return
                     issue["state"] = "OPEN"
                 done = call(["issue", "comment", str(issue["number"]), "-R", target,
                              "--body", "Reported again:\n" + _occurrence(record)])

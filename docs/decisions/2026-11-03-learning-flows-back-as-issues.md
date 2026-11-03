@@ -74,6 +74,7 @@ found twelve, overlapping on four. All of Copilot's held up when checked. What c
 | Send failures were silent | kit | `sync-status.json`, shown by `backlog.py status` |
 | Ranking counted comments, not repos | kit | `improve` counts distinct repos named |
 | Portable skills the kit itself installs counted as learned; the kit repo reported to itself | kit | Excluded |
+| Second Copilot pass: the idea title skipped the scrub; a sync read the log before taking the lock; a failed reopen still commented; every extra and Poetry group counted as dev tooling | Copilot | Title scrubbed; log re-read under the lock; a failed reopen leaves the entry queued; only groups named for development (`dev`, `test`, `lint`, `docs`, `typing`, ...) are read |
 
 Not taken: moving the send to a detached background process (the bounded budget removes the
 mid-create kill; a detached process is invisible when it fails), and a required `--gap` key

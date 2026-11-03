@@ -49,7 +49,12 @@ MAX_MANIFESTS = 200
 PACKAGE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)")
 SECTION = re.compile(r'^\s*\[\[?\s*([A-Za-z0-9_][A-Za-z0-9_.\-" ]*?)\s*\]\]?\s*(?:#.*)?$')
 KEY = re.compile(r'^\s*"?([A-Za-z0-9_.-]+)"?\s*=\s*')
-POETRY_DEV = re.compile(r"^tool\.poetry\.(?:group\.[^.]+\.dependencies|dev-dependencies)$")
+# An extra or a group counts as development tooling only by its name: an extra such as
+# `postgres = ["psycopg"]` is a runtime choice.
+DEV_GROUP = re.compile(r"^(?:dev|develop|development|test|tests|testing|lint|linting|docs?|typing|"
+                       r"types|typecheck|mypy|qa|ci|check|style|format|bench|benchmarks?)(?:[-_].*)?$",
+                       re.IGNORECASE)
+POETRY_DEV = re.compile(r"^tool\.poetry\.(?:group\.([^.]+)\.dependencies|dev-dependencies)$")
 
 
 def _read(path: Path) -> str:
@@ -105,9 +110,9 @@ def _array_strings(text: str, start: int) -> List[str]:
 
 
 def pyproject_dev_dependencies(text: str) -> Set[str]:
-    """Package names in pyproject.toml's development groups: `project.optional-dependencies`,
-    `dependency-groups` and Poetry's group and dev tables. Runtime `project.dependencies`
-    is not read.
+    """Package names in pyproject.toml's development groups: the extras, dependency groups
+    and Poetry groups named for development (`DEV_GROUP`), and Poetry's dev table. Runtime
+    `project.dependencies` and runtime extras are not read.
     A small reader rather than a TOML parser, because Python 3.8-3.10 have none; any other
     array (pytest's `testpaths`, say) is not a dependency and is not read."""
     names: Set[str] = set()
@@ -120,11 +125,12 @@ def pyproject_dev_dependencies(text: str) -> Set[str]:
             section = header.group(1).replace('"', "").replace(" ", "")
         elif key:
             name, rest = key.group(1), line[key.end():]
-            if POETRY_DEV.match(section):
-                if name != "python":
+            poetry = POETRY_DEV.match(section)
+            if poetry:
+                if name != "python" and (poetry.group(1) is None or DEV_GROUP.match(poetry.group(1))):
                     names.add(name)
             elif section in ("project.optional-dependencies", "dependency-groups") \
-                    and rest.lstrip().startswith("["):
+                    and DEV_GROUP.match(name) and rest.lstrip().startswith("["):
                 for spec in _array_strings(text, offset + key.end() + rest.index("[")):
                     match = PACKAGE.match(spec)
                     if match:

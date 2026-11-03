@@ -169,7 +169,7 @@ with the user's privileges. The manual verifier and Stop hook use the same gate 
 Repos that use the kit send what they learned back here, so it can become a PR.
 
 1. **Capture, in each repo, automatically.** The `learning_report.py` SessionEnd hook
-   compares the repo's skills, agents, MCP servers and development dependencies (dev groups,
+   compares the repo's skills, agents, MCP servers and development dependencies (groups named dev, test, lint, docs and the like,
    `devDependencies`, `requirements-dev*.txt`) with what was there at SessionStart, and
    records what is new. Runtime dependencies are not recorded. Claude records improvement
    ideas with `backlog.py add` as it works. Entries hold the repo name, the kind of thing,

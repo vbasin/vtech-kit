@@ -870,6 +870,7 @@ case "$1 $2" in
   "issue list") [ -n "$GH_LIST_FAIL" ] && exit 1; cat "$GH_ISSUES" 2>/dev/null || echo "[]";;
   "issue create") [ -n "$GH_FAIL" ] && exit 1; echo "https://github.com/o/kit/issues/7";;
   "issue comment") echo ok;;
+  "issue reopen") [ -n "$GH_REOPEN_FAIL" ] && exit 1; echo ok;;
 esac
 """
 ORIGIN = "https://github.com/acme/pipeline.git"
@@ -949,10 +950,12 @@ def test_only_what_the_session_added_is_recorded(repo: Path, data_dir: Path, tmp
     (repo / "pyproject.toml").write_text(
         "[project]\nname = 'p'\nkeywords = [\n  \"ml\",\n]\ndependencies = [\"uvicorn[standard]>=0.2\"]\n"
         "[project.optional-dependencies]\ndev = [\n  \"ruff\",  # lint\n  \"nox[uv]>=1\",\n]\n"
+        "postgres = [\"psycopg\"]\n"
         "[dependency-groups]\ndev = [\"mypy\", {include-group = \"lint\"}]\n"
         "[tool.pytest.ini_options]\ntestpaths = [\n  \"tests\",\n]\n"
         "[tool.poetry.dependencies]\npython = \"^3.9\"\npolars = \"^1\"\n"
-        "[tool.poetry.group.dev.dependencies]\nblack = \"^24\"\n")
+        "[tool.poetry.group.dev.dependencies]\nblack = \"^24\"\n"
+        "[tool.poetry.group.ml.dependencies]\ntorch = \"^2\"\n")
     events = end_session(repo, data_dir, tmp_path, "learn-6")
     assert {e["name"] for e in events} == {"hypothesis", "ruff", "nox", "black"}
 
@@ -982,6 +985,9 @@ def test_opted_in_repo_sends_new_entries_and_comments_on_repeats(
     idea = ("retry flaky HTTP calls in tests " + "with backoff " * 10 + "UNLESS the endpoint is idempotent; "
             "token ghp_abcdefghijklmnopqrstuvwxyz0123 in /home/v/notes.txt")
     backlog.append(learning, {"kind": "idea", "id": "i1", "task": "t", "idea": idea, "evidence": "e",
+                              "repo": "acme/pipeline", "created_at": "2026-11-03"})
+    backlog.append(learning, {"kind": "idea", "id": "i2", "task": "t", "evidence": "e",
+                              "idea": "ghp_abcdefghijklmnopqrstuvwxyz0123 leaked in a fixture",
                               "repo": "acme/pipeline", "created_at": "2026-11-03"})
     (tmp_path / "gh.log").unlink()
     hook("session_start.py", {"session_id": "learn-3", "cwd": str(repo)}, data_dir)
@@ -1044,3 +1050,39 @@ def test_a_running_sync_is_not_joined(repo: Path, data_dir: Path, tmp_path: Path
     (repo / ".claude/agents/a.md").write_text("x")
     events = end_session(repo, data_dir, tmp_path, "learn-8")
     assert not gh_log(tmp_path) and [e["kind"] for e in events] == ["component"]
+
+
+def test_a_failed_reopen_keeps_the_report_queued(repo: Path, data_dir: Path, tmp_path: Path) -> None:
+    # A comment on an issue that stays closed is outside `improve`'s inbox for good.
+    opt_in(repo, tmp_path)
+    backlog = backlog_module()
+    fp = backlog.fingerprint({"kind": "component", "type": "agent", "name": "a"})
+    issues = tmp_path / "issues.json"
+    issues.write_text(json.dumps([{"number": 3, "url": "u3", "state": "CLOSED",
+                                   "body": f"<!-- kit-learning:{fp} -->"}]))
+    hook("session_start.py", {"session_id": "learn-9", "cwd": str(repo)}, data_dir)
+    (repo / ".claude/agents").mkdir()
+    (repo / ".claude/agents/a.md").write_text("x")
+    events = end_session(repo, data_dir, tmp_path, "learn-9", GH_ISSUES=str(issues), GH_REOPEN_FAIL="1")
+    assert "issue comment" not in gh_log(tmp_path) and [e["kind"] for e in events] == ["component"]
+
+
+def test_a_sync_rereads_the_log_once_it_holds_the_lock(tmp_path: Path, monkeypatch) -> None:
+    # Another sync sent the entry between this one's first read and taking the lock.
+    backlog = backlog_module()
+    learning = tmp_path / "learning.jsonl"
+    entry = backlog.add_component(learning, "skill", "s", "acme/pipeline")
+    real_lock = backlog._lock
+
+    def lock_after_another_sync(path: Path):
+        backlog.append(path, {"kind": "synced", "id": entry["id"], "issue": "u1", "created_at": "x"})
+        return real_lock(path)
+
+    calls = []
+    monkeypatch.setattr(backlog, "_lock", lock_after_another_sync)
+    def run(args: list, timeout: float) -> subprocess.CompletedProcess:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "[]", "")
+
+    result = backlog.sync(learning, "o/kit", "acme/pipeline", run=run)
+    assert calls == [] and result["sent"] == [] and result["queued"] == 0
