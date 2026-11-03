@@ -1,4 +1,6 @@
-"""SessionStart: record which files were already dirty, so verification only covers this session's changes.
+"""SessionStart: record which files were already dirty, so verification only covers this session's changes,
+and which skills, agents, MCP servers and dependencies the repo already has, so SessionEnd
+reports only what this session added (`learning_report.py`).
 
 Prints nothing: SessionStart stdout would be added to Claude's context.
 """
@@ -22,6 +24,11 @@ def main() -> int:
     prune_old_state()
     state["baseline"] = snapshot(root)
     state.setdefault("edited", [])
+    try:
+        from learning_report import inventory
+        state["components"] = inventory(root)
+    except Exception:  # noqa: BLE001 — without an inventory SessionEnd records nothing
+        pass
     save_state(session_id, state)
     return 0
 

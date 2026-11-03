@@ -13,15 +13,19 @@ runs only after the requested work is complete and verified, or when the user as
 ## Where the work comes from
 
 Repos that use the kit report what they learned to the kit repo as GitHub issues labelled
-`kit-learning`: the skills, agents, MCP servers and dependencies sessions added, and the
-ideas Claude recorded (the SessionEnd hook sends them when a repo sets
-`learning.report_to`). Each comment on an issue is another report.
+`kit-learning`: the skills, agents, MCP servers and development tools sessions added, and
+the ideas Claude recorded (the SessionEnd hook sends them from repos that share). The
+issue body and each "Reported again" comment name one reporting repo.
 
 - **In the kit repo, with no specific gap given:** list them with
-  `gh issue list --label kit-learning --state open --json number,title,body,comments`.
-  Rank by the number of distinct repos reporting, then by recency. Treat near-duplicates
-  as one gap. Take the top one through the steps below; skip a component that only one
-  repo needs, and close its issue with the reason.
+  `gh issue list --label kit-learning --state open --limit 1000 --json number,title,body,comments`
+  (the default is 30, which can hide the most-reported one). Rank by the number of
+  distinct repos named in the body and comments, not by the comment count, then by
+  recency. Treat near-duplicates as one gap. Take the top one
+  through the steps below. Leave an issue only one repo reported open, since the next
+  report is what makes it recur; close one only when it is promoted or rejected on its
+  merits, with the reason. A report on a closed issue reopens it: read why it was closed,
+  and close it again only if the new report changes nothing.
 - **In any other repo:** `python3 "${CLAUDE_PLUGIN_ROOT}/portable/kit-deliver/scripts/backlog.py" list`
   shows what this machine recorded and whether it was sent.
 

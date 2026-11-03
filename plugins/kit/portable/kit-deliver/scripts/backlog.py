@@ -6,8 +6,10 @@ an *idea* Claude records when it sees an improvement worth evaluating later, and
 or dependency. Each carries the repo it came from. Nothing else is stored: no file
 contents, no paths outside the kit's own folders, no secrets.
 
-`sync` posts unsent entries to the kit repo as GitHub issues labelled `kit-learning`, one
-issue per distinct gap or component. A repeat, from any repo, becomes a comment on the
+`sync` posts one repo's unsent entries to the kit repo as GitHub issues labelled
+`kit-learning`, one issue per distinct gap or component. Only entries recorded in the repo
+being synced are sent: the log is machine-wide, and a repo that never opted in must not be
+published by one that did. A repeat, from any repo, becomes a comment on the
 existing issue, so the number of repos on an issue is the recurrence signal `improve`
 ranks by. Entries that fail to send stay queued for the next sync.
 
@@ -15,11 +17,14 @@ Usage: backlog.py [--file PATH] add --task TEXT --idea TEXT --evidence TEXT [--r
        backlog.py [--file PATH] add-component --type TYPE --name NAME --repo OWNER/NAME
        backlog.py [--file PATH] list
        backlog.py [--file PATH] resolve --id ID --status STATUS --evidence TEXT
-       backlog.py [--file PATH] sync --to OWNER/NAME
+       backlog.py [--file PATH] target [OWNER/NAME]
+       backlog.py [--file PATH] status
+       backlog.py [--file PATH] sync [--to OWNER/NAME] [--repo OWNER/NAME]
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import hashlib
 import json
@@ -144,81 +149,168 @@ def _title(record: Dict[str, Any]) -> str:
     return "[kit-learning] idea: " + str(record.get("idea", ""))[:80]
 
 
+SECRETS = re.compile(
+    r"(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}"
+    r"|xox[abpr]-[A-Za-z0-9-]{10,}|[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@\S+"
+    r"|[A-Fa-f0-9]{32,}|[A-Za-z0-9+/_-]{40,}={0,2}|(?:/home|/Users|/root)/\S+|[A-Za-z]:\\Users\\\S+)")
+
+
+def scrub(text: Any) -> str:
+    """Free text leaves the machine: drop what looks like a credential or a local path."""
+    return SECRETS.sub("[redacted]", str(text))
+
+
 def _occurrence(record: Dict[str, Any]) -> str:
     repo = record.get("repo") or "an unnamed repo"
     if record.get("kind") == "component":
         return (f"- **{repo}** added {record.get('type')} `{record.get('name')}` "
                 f"({str(record.get('created_at', ''))[:10]})")
-    return (f"- **{repo}** ({str(record.get('created_at', ''))[:10]}), during: {record.get('task')}\n"
-            f"  Evidence: {record.get('evidence')}")
+    return (f"- **{repo}** ({str(record.get('created_at', ''))[:10]}): {scrub(record.get('idea'))}\n"
+            f"  During: {scrub(record.get('task'))}\n  Evidence: {scrub(record.get('evidence'))}")
 
 
-Runner = Callable[[List[str]], subprocess.CompletedProcess]
+# The destination is the machine owner's choice, not the repo's: a repo's committed config
+# can only opt in to sending (`learning.share`), so a cloned repo cannot redirect this
+# machine's `gh` login to post somewhere else.
+def config_path(path: Path) -> Path:
+    return path.parent / "config.json"
 
 
-def _gh_runner(gh: str, timeout: float) -> Runner:
-    def run(args: List[str]) -> subprocess.CompletedProcess:
-        return subprocess.run([gh, *args], capture_output=True, text=True, timeout=timeout)
+def report_target(path: Path) -> str:
+    try:
+        value = json.loads(config_path(path).read_text(encoding="utf-8")).get("report_to")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return value if isinstance(value, str) and SLUG.fullmatch(value) else ""
+
+
+def set_report_target(path: Path, target: str) -> None:
+    if target and not SLUG.fullmatch(target):
+        raise ValueError("target must be OWNER/NAME")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    config_path(path).write_text(json.dumps({"report_to": target}) + "\n", encoding="utf-8")
+
+
+def status_path(path: Path) -> Path:
+    return path.parent / "sync-status.json"
+
+
+Runner = Callable[[List[str], float], subprocess.CompletedProcess]
+
+
+def _gh_runner(gh: str) -> Runner:
+    env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
+
+    def run(args: List[str], timeout: float) -> subprocess.CompletedProcess:
+        return subprocess.run([gh, *args], capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL, env=env)
     return run
 
 
-def sync(path: Path, target: str, run: Optional[Runner] = None, budget_s: float = 45.0) -> Dict[str, Any]:
-    """Send unsent entries to `target` as kit-learning issues. Never raises on a network
-    or auth failure: what could not be sent stays queued."""
-    if not SLUG.fullmatch(target):
-        raise ValueError("--to must be OWNER/NAME")
-    pending = [r for r in read_records(path).values() if not r.get("synced_to")]
+def _lock(path: Path) -> Optional[Path]:
+    """One sync per machine at a time, so two sessions ending together cannot both create
+    an issue for the same gap. A lock older than two minutes belongs to a killed sync."""
+    lock = path.parent / "sync.lock"
+    try:
+        if time.time() - lock.stat().st_mtime > 120:
+            lock.unlink()
+    except OSError:
+        pass
+    try:
+        os.close(os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        return lock
+    except OSError:
+        return None
+
+
+def sync(path: Path, target: str, repo: str, run: Optional[Runner] = None,
+         budget_s: float = 40.0) -> Dict[str, Any]:
+    """Send `repo`'s unsent entries to `target` as kit-learning issues, within `budget_s`.
+    Never raises on a network or auth failure: what could not be sent stays queued, and
+    the outcome is kept in `sync-status.json` next to the log (`backlog.py status`)."""
+    if not SLUG.fullmatch(target) or not SLUG.fullmatch(repo):
+        raise ValueError("--to and --repo must be OWNER/NAME")
+    pending = [r for r in read_records(path).values()
+               if r.get("repo") == repo and not r.get("synced_to")]
     result: Dict[str, Any] = {"sent": [], "queued": len(pending), "error": ""}
     if not pending:
         return result
     if run is None:
         gh = shutil.which("gh")
-        if gh is None:
-            result["error"] = "gh is not installed; entries stay queued"
-            return result
-        run = _gh_runner(gh, timeout=15)
-    deadline = time.monotonic() + budget_s
+        run = _gh_runner(gh) if gh else None
+    lock = _lock(path) if run else None
+    if run is None:
+        result["error"] = "gh is not installed; entries stay queued"
+    elif lock is None:
+        result["error"] = "another sync is running; entries stay queued"
+    else:
+        try:
+            _send(path, target, pending, run, time.monotonic() + budget_s, result)
+        finally:
+            lock.unlink()
+    result["queued"] = len(pending) - len(result["sent"])
+    with contextlib.suppress(OSError):
+        status_path(path).write_text(json.dumps({"at": now(), "repo": repo, "target": target, **result}),
+                                     encoding="utf-8")
+    return result
+
+
+def _send(path: Path, target: str, pending: List[Dict[str, Any]], run: Runner, deadline: float,
+          result: Dict[str, Any]) -> None:
+    def call(args: List[str]) -> Optional[subprocess.CompletedProcess]:
+        left = deadline - time.monotonic()
+        # A call cut off mid-create would post an issue the log never hears about.
+        return run(args, min(15.0, left)) if left > 5 else None
+
     try:
-        listed = run(["issue", "list", "-R", target, "--label", LABEL, "--state", "all",
-                      "--limit", "1000", "--json", "number,body,url"])
-        if listed.returncode != 0:
-            # The label may not exist yet; create it once and treat the list as empty.
-            run(["label", "create", LABEL, "-R", target, "--color", "0E8A16",
-                 "--description", "Reported by a repo that uses the kit"])
-            issues: List[Dict[str, Any]] = []
-        else:
-            issues = json.loads(listed.stdout or "[]")
+        listed = call(["issue", "list", "-R", target, "--label", LABEL, "--state", "all",
+                       "--limit", "1000", "--json", "number,body,url,state"])
+        if listed is None or listed.returncode != 0:
+            # Not knowing which issues exist is not knowing that none do: creating now
+            # could split one gap across two issues. Leave everything queued.
+            result["error"] = ((listed.stderr if listed else "") or "gh issue list failed").strip()[:300]
+            return
         known = {}
-        for issue in issues:
+        for issue in json.loads(listed.stdout or "[]"):
             found = re.search(r"<!-- kit-learning:([0-9a-f]{12}) -->", issue.get("body") or "")
             if found:
                 known[found.group(1)] = issue
+        labelled = False
         for record in pending:
-            if time.monotonic() > deadline:
-                break
             fp = fingerprint(record)
-            if fp in known:
-                done = run(["issue", "comment", str(known[fp]["number"]), "-R", target,
-                            "--body", "Reported again:\n" + _occurrence(record)])
-                url = known[fp].get("url") or f"#{known[fp]['number']}"
+            issue = known.get(fp)
+            if issue:
+                if str(issue.get("state", "")).upper() == "CLOSED":
+                    # A new report is new evidence: put it back in front of `improve`.
+                    call(["issue", "reopen", str(issue["number"]), "-R", target])
+                    issue["state"] = "OPEN"
+                done = call(["issue", "comment", str(issue["number"]), "-R", target,
+                             "--body", "Reported again:\n" + _occurrence(record)])
+                url = issue.get("url") or f"#{issue['number']}"
             else:
+                if not labelled:  # listing a missing label succeeds empty; creating with it fails
+                    call(["label", "create", LABEL, "-R", target, "--force", "--color", "0E8A16",
+                          "--description", "Reported by a repo that uses the kit"])
+                    labelled = True
                 body = (f"{_marker(fp)}\nReported automatically by a repo that uses the kit. "
-                        "Each comment is another report; the number of distinct repos is how "
-                        f"often this recurs.\n\n{_occurrence(record)}")
-                done = run(["issue", "create", "-R", target, "--title", _title(record),
-                            "--body", body, "--label", LABEL])
-                url = (done.stdout or "").strip().splitlines()[-1] if done.stdout else ""
-                if done.returncode == 0:
-                    known[fp] = {"number": url.rsplit("/", 1)[-1], "url": url}
-            if done.returncode != 0:
-                result["error"] = (done.stderr or "gh failed").strip()[:300]
-                break
+                        "Each comment is another report; the number of distinct repos named "
+                        f"here is how often this recurs.\n\n{_occurrence(record)}")
+                done = call(["issue", "create", "-R", target, "--title", _title(record),
+                             "--body", body, "--label", LABEL])
+                lines = (done.stdout or "").strip().splitlines() if done else []
+                url = next((ln for ln in reversed(lines) if "/issues/" in ln), "")
+                if url:
+                    known[fp] = {"number": url.rsplit("/", 1)[-1], "url": url, "state": "OPEN"}
+            if done is None:
+                result["error"] = "out of time; entries stay queued"
+                return
+            if done.returncode != 0 or not url:
+                result["error"] = (done.stderr or "gh gave no issue URL").strip()[:300]
+                return
             append(path, {"kind": "synced", "id": record["id"], "issue": url, "created_at": now()})
             result["sent"].append(url)
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"[:300]
-    result["queued"] = len(pending) - len(result["sent"])
-    return result
 
 
 def main() -> int:
@@ -239,15 +331,38 @@ def main() -> int:
     resolve.add_argument("--id", required=True)
     resolve.add_argument("--status", choices=("evaluated", "rejected", "promoted"), required=True)
     resolve.add_argument("--evidence", required=True)
+    target = sub.add_parser("target", help="show, or set, where this machine sends learning")
+    target.add_argument("repo", nargs="?", default=None, help="the kit repo, OWNER/NAME; '' to stop sending")
+    sub.add_parser("status", help="what is queued and how the last sync went")
     send = sub.add_parser("sync")
-    send.add_argument("--to", required=True, help="the kit repo, OWNER/NAME")
+    send.add_argument("--to", default=None, help="the kit repo, OWNER/NAME; defaults to the target")
+    send.add_argument("--repo", default=None, help="whose entries to send; defaults to this checkout's origin")
     args = parser.parse_args()
     try:
+        if args.action == "target":
+            if args.repo is not None:
+                set_report_target(args.file, args.repo)
+            print(json.dumps({"report_to": report_target(args.file)}))
+            return 0
         if args.action == "sync":
-            result = sync(args.file, args.to)
+            to = args.to or report_target(args.file)
+            if not to:
+                raise ValueError("no target: run `backlog.py target OWNER/NAME` or pass --to")
+            result = sync(args.file, to, repo_slug() if args.repo is None else args.repo)
             print(json.dumps(result))
             return 0 if not result["error"] else 1
         records = read_records(args.file)
+        if args.action == "status":
+            try:
+                last = json.loads(status_path(args.file).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                last = None
+            unsent = [r for r in records.values() if not r.get("synced_to")]
+            print(json.dumps({"report_to": report_target(args.file), "queued": len(unsent),
+                              "queued_by_repo": {r: sum(1 for u in unsent if u.get("repo") == r)
+                                                 for r in sorted({str(u.get("repo")) for u in unsent})},
+                              "last_sync": last}, indent=2))
+            return 0
         if args.action == "list":
             print(json.dumps(list(records.values()), indent=2))
             return 0

@@ -867,11 +867,12 @@ def test_a_gap_notice_never_says_the_checks_passed(repo: Path, data_dir: Path) -
 FAKE_GH = """#!/bin/sh
 echo "$@" >> "$GH_LOG"
 case "$1 $2" in
-  "issue list") [ -n "$GH_FAIL" ] && exit 1; cat "$GH_ISSUES" 2>/dev/null || echo "[]";;
+  "issue list") [ -n "$GH_LIST_FAIL" ] && exit 1; cat "$GH_ISSUES" 2>/dev/null || echo "[]";;
   "issue create") [ -n "$GH_FAIL" ] && exit 1; echo "https://github.com/o/kit/issues/7";;
   "issue comment") echo ok;;
 esac
 """
+ORIGIN = "https://github.com/acme/pipeline.git"
 
 
 def end_session(repo: Path, data_dir: Path, tmp_path: Path, sid: str, **env: str) -> list:
@@ -893,9 +894,28 @@ def end_session(repo: Path, data_dir: Path, tmp_path: Path, sid: str, **env: str
     return [json.loads(line) for line in learning.read_text().splitlines()]
 
 
+def opt_in(repo: Path, tmp_path: Path, target: str = "o/kit") -> None:
+    """The machine names the kit repo; the repo consents to sharing."""
+    sh(repo, "git", "remote", "add", "origin", ORIGIN)
+    set_config(repo, learning={"share": True})
+    commit(repo, "share")
+    (tmp_path / "config.json").write_text(json.dumps({"report_to": target}))
+
+
+def backlog_module():
+    sys.path.insert(0, str(SCRIPTS.parent / "portable" / "kit-deliver" / "scripts"))
+    import backlog
+    return backlog
+
+
+def gh_log(tmp_path: Path) -> str:
+    log = tmp_path / "gh.log"
+    return log.read_text() if log.exists() else ""
+
+
 def test_session_end_records_what_the_session_added(repo: Path, data_dir: Path, tmp_path: Path) -> None:
     sh(repo, "git", "remote", "add", "origin", "git@github.com:acme/pipeline.git")
-    (repo / "requirements.txt").write_text("requests==2.0\n")
+    (repo / "requirements-dev.txt").write_text("pytest\n")
     commit(repo, "deps")
     base = {"session_id": "learn-1", "cwd": str(repo)}
     hook("session_start.py", base, data_dir)
@@ -904,49 +924,123 @@ def test_session_end_records_what_the_session_added(repo: Path, data_dir: Path, 
     (repo / ".claude/agents").mkdir()
     (repo / ".claude/agents/sql-checker.md").write_text("---\nname: sql-checker\n---\n")
     (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"playwright": {"command": "npx"}}}))
-    (repo / "requirements.txt").write_text("requests==2.0\nhttpx>=0.27\n# comment\n")
+    (repo / "requirements-dev.txt").write_text("pytest\npytest-xdist>=3\n# comment\n-r base.txt\n")
+    (repo / "requirements.txt").write_text("polars\n")  # runtime: the project's business
+    (repo / "package.json").write_text(json.dumps({"dependencies": {"react": "1"},
+                                                   "devDependencies": {"@playwright/test": "1"}}))
     events = end_session(repo, data_dir, tmp_path, "learn-1")
     got = {(e["type"], e["name"], e["repo"]) for e in events if e["kind"] == "component"}
     assert got == {("skill", "trace-repro", "acme/pipeline"), ("agent", "sql-checker", "acme/pipeline"),
-                   ("mcp-server", "playwright", "acme/pipeline"), ("dependency", "httpx", "acme/pipeline")}
-    assert not (tmp_path / "gh.log").exists(), "sent without the repo opting in"
+                   ("mcp-server", "playwright", "acme/pipeline"), ("dependency", "pytest-xdist", "acme/pipeline"),
+                   ("dependency", "@playwright/test", "acme/pipeline")}
+    assert not gh_log(tmp_path), "sent without the repo opting in"
     assert len(end_session(repo, data_dir, tmp_path, "learn-1")) == len(events), "recorded twice"
+
+
+def test_only_what_the_session_added_is_recorded(repo: Path, data_dir: Path, tmp_path: Path) -> None:
+    # Already dirty or untracked at SessionStart is not this session's work.
+    (repo / "requirements-dev.txt").write_text("pytest\nhttpx\n")
+    (repo / ".claude/skills/old").mkdir(parents=True)
+    (repo / ".claude/skills/old/SKILL.md").write_text("x")
+    (repo / "pyproject.toml").write_text("[project]\nname = 'p'\n[dependency-groups]\ndev = [\"mypy\"]\n")
+    hook("session_start.py", {"session_id": "learn-6", "cwd": str(repo)}, data_dir)
+    (repo / "requirements-dev.txt").write_text("pytest\nhttpx\nhypothesis\n")
+    (repo / ".claude/skills/old/SKILL.md").write_text("edited")
+    (repo / "pyproject.toml").write_text(
+        "[project]\nname = 'p'\nkeywords = [\n  \"ml\",\n]\ndependencies = [\"uvicorn[standard]>=0.2\"]\n"
+        "[project.optional-dependencies]\ndev = [\n  \"ruff\",  # lint\n  \"nox[uv]>=1\",\n]\n"
+        "[dependency-groups]\ndev = [\"mypy\", {include-group = \"lint\"}]\n"
+        "[tool.pytest.ini_options]\ntestpaths = [\n  \"tests\",\n]\n"
+        "[tool.poetry.dependencies]\npython = \"^3.9\"\npolars = \"^1\"\n"
+        "[tool.poetry.group.dev.dependencies]\nblack = \"^24\"\n")
+    events = end_session(repo, data_dir, tmp_path, "learn-6")
+    assert {e["name"] for e in events} == {"hypothesis", "ruff", "nox", "black"}
 
 
 def test_opted_in_repo_sends_new_entries_and_comments_on_repeats(
         repo: Path, data_dir: Path, tmp_path: Path) -> None:
-    set_config(repo, learning={"report_to": "o/kit"})
-    commit(repo, "opt in")
+    opt_in(repo, tmp_path)
     hook("session_start.py", {"session_id": "learn-2", "cwd": str(repo)}, data_dir)
     (repo / ".claude/skills/trace-repro").mkdir(parents=True)
     (repo / ".claude/skills/trace-repro/SKILL.md").write_text("x")
     events = end_session(repo, data_dir, tmp_path, "learn-2")
     assert [e["issue"] for e in events if e["kind"] == "synced"] == ["https://github.com/o/kit/issues/7"]
-    log = (tmp_path / "gh.log").read_text()
+    log = gh_log(tmp_path)
+    assert "label create kit-learning -R o/kit --force" in log, "a fresh kit repo has no label to file under"
     assert "issue create -R o/kit --title [kit-learning] skill: trace-repro" in log
 
-    # The same skill from another repo is a comment on that issue, not a new issue.
-    sys.path.insert(0, str(SCRIPTS.parent / "portable" / "kit-deliver" / "scripts"))
-    import backlog
+    # The same skill reported again is a comment that reopens a closed issue; an idea
+    # sends its whole text, scrubbed; an entry another repo on this machine recorded stays.
+    backlog = backlog_module()
     fp = backlog.fingerprint({"kind": "component", "type": "skill", "name": "Trace-Repro"})
     issues = tmp_path / "issues.json"
-    issues.write_text(json.dumps([{"number": 7, "url": "u7", "body": f"<!-- kit-learning:{fp} -->"}]))
+    issues.write_text(json.dumps([{"number": 7, "url": "u7", "state": "CLOSED",
+                                   "body": f"<!-- kit-learning:{fp} -->"}]))
     learning = tmp_path / "learning.jsonl"
-    backlog.add_component(learning, "skill", "trace-repro", "acme/other")
+    backlog.add_component(learning, "skill", "trace-repro", "acme/pipeline")
+    backlog.add_component(learning, "skill", "private-thing", "acme/secret")
+    idea = ("retry flaky HTTP calls in tests " + "with backoff " * 10 + "UNLESS the endpoint is idempotent; "
+            "token ghp_abcdefghijklmnopqrstuvwxyz0123 in /home/v/notes.txt")
+    backlog.append(learning, {"kind": "idea", "id": "i1", "task": "t", "idea": idea, "evidence": "e",
+                              "repo": "acme/pipeline", "created_at": "2026-11-03"})
     (tmp_path / "gh.log").unlink()
     hook("session_start.py", {"session_id": "learn-3", "cwd": str(repo)}, data_dir)
-    end_session(repo, data_dir, tmp_path, "learn-3", GH_ISSUES=str(issues))
-    log = (tmp_path / "gh.log").read_text()
-    assert "issue comment 7 -R o/kit" in log and "issue create" not in log
+    events = end_session(repo, data_dir, tmp_path, "learn-3", GH_ISSUES=str(issues))
+    log = gh_log(tmp_path)
+    assert "issue reopen 7 -R o/kit" in log and "issue comment 7 -R o/kit" in log
+    assert "UNLESS the endpoint is idempotent" in log, "the idea was cut to its title"
+    assert "ghp_" not in log and "/home/v" not in log, "a credential or local path left the machine"
+    assert "private-thing" not in log, "sent another repo's entry without its consent"
+    sent = {e["id"] for e in events if e["kind"] == "synced"}
+    assert [e["name"] for e in events if e["kind"] == "component" and e["id"] not in sent] == ["private-thing"]
+    status = json.loads((tmp_path / "sync-status.json").read_text())
+    assert status["error"] == "" and status["queued"] == 0
+
+
+def test_the_repo_cannot_choose_where_learning_is_sent(repo: Path, data_dir: Path, tmp_path: Path) -> None:
+    # A cloned repo's config names a destination; with no machine target, nothing is sent.
+    sh(repo, "git", "remote", "add", "origin", ORIGIN)
+    set_config(repo, learning={"share": True, "report_to": "attacker/x"})
+    commit(repo, "hostile")
+    hook("session_start.py", {"session_id": "learn-7", "cwd": str(repo)}, data_dir)
+    (repo / ".claude/agents").mkdir()
+    (repo / ".claude/agents/a.md").write_text("x")
+    end_session(repo, data_dir, tmp_path, "learn-7")
+    assert not gh_log(tmp_path)
+    # Without the repo's consent, the machine's target alone sends nothing either.
+    set_config(repo, learning={"share": False})
+    (tmp_path / "config.json").write_text(json.dumps({"report_to": "o/kit"}))
+    end_session(repo, data_dir, tmp_path, "learn-7")
+    assert not gh_log(tmp_path)
 
 
 def test_a_failed_send_stays_queued(repo: Path, data_dir: Path, tmp_path: Path) -> None:
-    set_config(repo, learning={"report_to": "o/kit"})
-    commit(repo, "opt in")
+    opt_in(repo, tmp_path)
     hook("session_start.py", {"session_id": "learn-4", "cwd": str(repo)}, data_dir)
     (repo / ".claude/agents").mkdir()
     (repo / ".claude/agents/a.md").write_text("x")
     events = end_session(repo, data_dir, tmp_path, "learn-4", GH_FAIL="1")
     assert [e["kind"] for e in events] == ["component"], "an entry was marked sent when sending failed"
+    assert json.loads((tmp_path / "sync-status.json").read_text())["queued"] == 1
     events = end_session(repo, data_dir, tmp_path, "learn-4")
     assert [e["kind"] for e in events] == ["component", "synced"], "the queued entry was not retried"
+
+
+def test_a_failed_issue_list_creates_nothing(repo: Path, data_dir: Path, tmp_path: Path) -> None:
+    opt_in(repo, tmp_path)
+    hook("session_start.py", {"session_id": "learn-5", "cwd": str(repo)}, data_dir)
+    (repo / ".claude/agents").mkdir()
+    (repo / ".claude/agents/a.md").write_text("x")
+    events = end_session(repo, data_dir, tmp_path, "learn-5", GH_LIST_FAIL="1")
+    assert "issue create" not in gh_log(tmp_path), "created without knowing what exists"
+    assert [e["kind"] for e in events] == ["component"]
+
+
+def test_a_running_sync_is_not_joined(repo: Path, data_dir: Path, tmp_path: Path) -> None:
+    opt_in(repo, tmp_path)
+    (tmp_path / "sync.lock").write_text("")
+    hook("session_start.py", {"session_id": "learn-8", "cwd": str(repo)}, data_dir)
+    (repo / ".claude/agents").mkdir()
+    (repo / ".claude/agents/a.md").write_text("x")
+    events = end_session(repo, data_dir, tmp_path, "learn-8")
+    assert not gh_log(tmp_path) and [e["kind"] for e in events] == ["component"]

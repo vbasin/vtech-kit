@@ -29,11 +29,13 @@
 
 ## What it does
 
-- `learning_report.py` (SessionEnd) records skills, agents, MCP servers and dependencies
-  added since SessionStart into `backlog.py`'s log, names only, tagged with the repo.
-- With `learning.report_to` set in the repo's `.claude/kit.json`, it sends queued entries
-  as `kit-learning` issues. Fingerprint: component type + name, or the idea's first words.
-  Failures leave entries queued.
+- `learning_report.py` (SessionEnd) records the skills, agents, MCP servers and
+  development dependencies that are in the repo now and were not in SessionStart's
+  inventory, names only, tagged with the repo.
+- When the machine names a target (`backlog.py target OWNER/NAME`) and the repo consents
+  (`learning.share` in `.claude/kit.json`), it sends that repo's queued entries as
+  `kit-learning` issues. Fingerprint: component type + name, or the idea's first words.
+  Failures leave entries queued; the last outcome is in `backlog.py status`.
 - `improve` in the kit repo ranks open `kit-learning` issues by distinct repos, builds and
   scores the top one, and opens a PR that closes it. Its description now names this case,
   because without it the skill did not fire on the eval prompt.
@@ -51,3 +53,31 @@ with #21; it now judges the plan, not paragraph order.
   gap key Claude writes, not the idea text.
 - The kit repo becomes public and repo names are sensitive → send a hash of the repo
   name instead.
+
+## Review round (PR #16): Copilot, then the kit on itself
+
+Copilot left eight comments; `/kit:deliver` run headless on the branch (read-only, $0.46)
+found twelve, overlapping on four. All of Copilot's held up when checked. What changed:
+
+| Finding | Source | Change |
+|---|---|---|
+| A sync sent every repo's entries from the machine-wide log | both | Only the syncing repo's entries are sent |
+| The repo's committed config chose the destination, so a cloned repo could redirect the user's `gh` login | kit | The machine owner sets the target; a repo can only consent (`learning.share`) |
+| A failed `issue list` was read as "no issues", so a retry could duplicate one | both | It stops and leaves everything queued |
+| Listing a missing label succeeds empty, so the label was never created | Copilot | `gh label create --force` before the first create |
+| An idea's text reached GitHub only as an 80-character title | Copilot | The whole idea goes in the body, scrubbed of credential- and home-path-shaped text |
+| Comparing with HEAD reported files already dirty or untracked at SessionStart | Copilot | SessionStart stores an inventory; SessionEnd reports the difference |
+| `pyproject.toml` parsing read any quoted line (`testpaths`, `keywords`) | both | A reader for the dependency-group arrays and tables only |
+| Runtime dependencies would bury the skill and agent signal; one repo's data library is not kit work | kit | Only development dependencies are recorded |
+| `improve` listed 30 issues and closed single-repo ones, which a later report could not revive | Copilot | `--limit 1000`; single-repo issues stay open; a report on a closed issue reopens it |
+| A call could run past the hook timeout mid-create; two sessions could sync at once | kit | Each call gets the remaining budget, none starts with under 5s left; one sync per machine (lock) |
+| Send failures were silent | kit | `sync-status.json`, shown by `backlog.py status` |
+| Ranking counted comments, not repos | kit | `improve` counts distinct repos named |
+| Portable skills the kit itself installs counted as learned; the kit repo reported to itself | kit | Excluded |
+
+Not taken: moving the send to a detached background process (the bounded budget removes the
+mid-create kill; a detached process is invisible when it fails), and a required `--gap` key
+for ideas (`improve` already merges near-duplicates; the reversal condition below stands).
+The kit review's claim that `vbasin/vtech-kit` does not exist was wrong: the repository was
+renamed, and `vbasin/claude-kit` redirects to it.
+

@@ -83,7 +83,7 @@ A repo points `deliver` at its own gates and reviewers in `.claude/kit.json`:
 | PreToolUse (Bash) | `bash_guard.py` | Asks before `DROP`/`TRUNCATE`/`DELETE` without `WHERE`/chunk operations, before full-suite pytest runs (opt-in), and before repo-specific patterns |
 | PostToolUse (Edit/Write) | `post_edit.py` | Remembers the edited file and lints it at once |
 | Stop | `stop_verify.py` | Lints the session's changed `.py` files and runs the tests related to them, as explicit paths: their own test files and every test whose imports reach them, nearest first, up to `tests.max_files`. On failure it sends the output back so Claude keeps working. Gaps it cannot close (files no gate covers, tests left out by the cap) are shown to you once and do not block. A diff that already passed is not re-run on the next turn. If Claude stops again with the same failure, it lets the stop through with a notice, so a pre-existing failure can't trap a session |
-| SessionEnd | `learning_report.py` | Records the skills, agents, MCP servers and dependencies the session added, and sends queued learning to the kit repo when the repo opts in (see below) |
+| SessionEnd | `learning_report.py` | Records the skills, agents, MCP servers and development tools the session added, and sends the repo's queued learning to the kit repo when both the machine and the repo opt in (see below) |
 
 Related tests are found through the repo's own import graph, so a test of `b.py` still runs when `a.py`, which `b` imports, changed. Deleted files are included. Each run starts with an empty bytecode cache, and an interpreter without pytest counts as a failure rather than a pass. `tests.scope: "all"` runs every test file instead, for a repo whose whole suite is cheap. In a large repo many edits reach most of the suite through shared modules (in ML_analytics, editing `src/common/config.py` reaches 162 of 180 test files), so there the cap is what keeps the hook fast and `verification.gates` is the better tool: the repo says what covers what instead of the hook inferring it. A repo can add guard patterns in `.claude/kit.json`:
 
@@ -168,23 +168,42 @@ with the user's privileges. The manual verifier and Stop hook use the same gate 
 
 Repos that use the kit send what they learned back here, so it can become a PR.
 
-1. **Capture, in each repo, automatically.** When a session ends, the `learning_report.py`
-   SessionEnd hook records the skills, agents, MCP servers and dependencies it added, and
-   Claude records improvement ideas with `backlog.py add` as it works. Entries hold the repo
-   name, the kind of thing, its name and a one-line reason: no file contents, no secrets.
-   They queue in `~/.vtech-kit/learning.jsonl` on that machine.
-2. **Send, opt-in per repo.** A repo whose `.claude/kit.json` has
-   `"learning": {"report_to": "vbasin/vtech-kit"}` sends queued entries here at session end
-   with `gh`, as issues labelled `kit-learning`. The same gap from another repo is a
-   comment on the existing issue, so the number of repos on an issue is how often it
-   recurs. Offline or signed out, entries wait for the next session. To send by hand:
-   `python3 plugins/kit/portable/kit-deliver/scripts/backlog.py sync --to vbasin/vtech-kit`.
+1. **Capture, in each repo, automatically.** The `learning_report.py` SessionEnd hook
+   compares the repo's skills, agents, MCP servers and development dependencies (dev groups,
+   `devDependencies`, `requirements-dev*.txt`) with what was there at SessionStart, and
+   records what is new. Runtime dependencies are not recorded. Claude records improvement
+   ideas with `backlog.py add` as it works. Entries hold the repo name, the kind of thing,
+   its name and, for ideas, a few lines of text with anything that looks like a credential
+   or a home-directory path redacted before sending. They queue in
+   `~/.vtech-kit/learning.jsonl` on that machine (`KIT_LEARNING_FILE` moves it).
+2. **Send, when the machine and the repo both opt in.** The machine names the kit repo once;
+   the repo's `.claude/kit.json` consents with `"learning": {"share": true}` (the template
+   sets it). A repo's file can consent but cannot choose the destination, so a cloned repo
+   cannot point your `gh` login somewhere else, and a session only ever sends its own repo's
+   entries. They go as issues labelled `kit-learning`; the same gap from another repo is a
+   comment on the existing issue (reopening it if it was closed), so the number of repos on
+   an issue is how often it recurs. Offline or signed out, entries wait for the next session.
 3. **Improve, here.** In this repo, `/kit:improve` reads the open `kit-learning` issues,
    starts with the one the most repos reported, builds and scores a candidate, and opens a
    PR that closes the issue. Nothing merges without you.
 
-The machine needs `gh` signed in (`gh auth login`). If this repo is public, the issues are
-public too: they show repo names and component names.
+Turning sending on, once per machine (the VM, your laptop), in a terminal:
+
+1. Check `gh` is signed in: type `gh auth status` and press Enter. If it says you are not
+   logged in, type `gh auth login`, press Enter, and pick GitHub.com, HTTPS, and "Login with
+   a web browser"; it prints a code and a link, open the link, paste the code.
+2. Name the kit repo as this machine's target. Copy this whole line, paste it, press Enter:
+   `python3 "$(find ~/.claude/plugins -path '*kit-deliver/scripts/backlog.py' | head -1)" target vbasin/vtech-kit`
+   It prints `{"report_to": "vbasin/vtech-kit"}`. If it prints an error about a missing
+   file instead, open Claude Code, type `/plugin marketplace update vtech-kit`, press Enter,
+   quit Claude Code, and run the line again.
+3. Any time later, the same line with `status` in place of `target vbasin/vtech-kit` shows
+   what is queued per repo and how the last send went; with `target ""` it stops sending
+   from this machine.
+
+A repo adopted before this change needs `"learning": {"share": true}` added to its
+`.claude/kit.json`. If this repo is public, the issues are public too: they show repo
+names, component names and idea text.
 
 ## Learning reusable skills
 

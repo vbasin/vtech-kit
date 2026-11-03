@@ -9,9 +9,10 @@ The one statement of this rule. `kit-deliver`, Claude's `deliver`, `deliberate` 
 2. **Something available is adequate** → use it, and finish and verify the task first.
    Record the improvement idea without secrets (`scripts/backlog.py add` in this skill
    folder, or the report's "what remains" line) and evaluate it only after delivery, or
-   when the user asks. In a repo whose kit config sets `learning.report_to`, recorded
-   ideas, and the components a session added, reach the kit repo as `kit-learning` issues
-   at session end; the kit is improved from there, never from inside this repo.
+   when the user asks. In a repo that shares learning (`learning.share` in its kit config),
+   recorded ideas, and the components a session added, reach the kit repo as
+   `kit-learning` issues at session end; the kit is improved from there, never from inside
+   this repo.
 3. **Where an addition lives.** One that names no path, no schema, no service and no rule
    of the repo it was built in — you can describe it without saying which repo you were
    in — belongs in the kit; say so in the report, with the case for it. Anything else

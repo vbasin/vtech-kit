@@ -21,7 +21,7 @@
     "patterns": []
   },
   "learning": {
-    "report_to": "vbasin/vtech-kit"
+    "share": true
   },
   "routing": {
     "enabled": true,

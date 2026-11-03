@@ -12,7 +12,7 @@ repos that use the kit filed automatically at the end of their sessions:
 
 - #21 "[kit-learning] skill: trace-repro" — opened by ml-analytics (Oct 28); comments
   "Reported again" from grok-bot (Oct 30) and site-builder (Nov 1).
-- #22 "[kit-learning] dependency: polars" — opened by ml-analytics (Oct 29); no comments.
+- #22 "[kit-learning] dependency: pytest-xdist" — opened by ml-analytics (Oct 29); no comments.
 - #23 "[kit-learning] idea: retry wrapper for flaky HTTP calls in tests" — opened by
   grok-bot (Oct 31); no comments.
 
