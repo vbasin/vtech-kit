@@ -1,6 +1,7 @@
 """Native Codex and Grok lifecycle adapters for the portable kit (Python 3.8+)."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import sys
@@ -11,6 +12,11 @@ from typing import Any, Dict
 from bash_guard import check
 from kit_common import changed_since, load_config, load_state, repo_root, save_state, snapshot
 from stop_verify import verify
+
+try:  # copied in by install_portable; absent in an older install
+    import learning_report
+except Exception:  # noqa: BLE001 — learning is optional, verification is not
+    learning_report = None  # type: ignore[assignment]
 
 POLICY = ("Use the kit-deliver skill for substantive requests. Complete the user's task first; "
           "use existing relevant capabilities, obtain missing task-critical ones, compare material "
@@ -24,21 +30,45 @@ def root_for(data: Dict[str, Any]) -> Path:
     return root
 
 
-def state_id(data: Dict[str, Any]) -> str:
-    session = data.get("session_id")
+def state_id(data: Dict[str, Any], host: str = "codex") -> str:
+    session = data.get("session_id") or data.get("sessionId")
     if not isinstance(session, str) or not session:
         raise ValueError("missing session id")
-    return "codex-" + hashlib.sha256(session.encode()).hexdigest()
+    return f"{host}-" + hashlib.sha256(session.encode()).hexdigest()
 
 
-def start(data: Dict[str, Any]) -> Dict[str, Any]:
+def begin(host: str, data: Dict[str, Any]) -> Path:
+    """Session baseline for verification, and the component inventory learning diffs."""
     root = root_for(data)
-    sid = state_id(data)
+    sid = state_id(data, host)
     state = load_state(sid)
     if not state.get("baseline"):
         state["baseline"] = snapshot(root)
         state["edited"] = []
+        if learning_report is not None and learning_report.backlog is not None:
+            with contextlib.suppress(Exception):  # without an inventory nothing is captured
+                state["components"] = learning_report.inventory(root)
         save_state(sid, state)
+    return root
+
+
+def learn(host: str, data: Dict[str, Any], budget_s: float) -> None:
+    """Record and send what the session added. Stop runs every turn on both hosts, and a
+    repeat records nothing new, so this is safe there. Never affects the hook's answer."""
+    if learning_report is None or learning_report.backlog is None or budget_s < 5:
+        return
+    try:
+        root = root_for(data)
+        sid = state_id(data, host)
+        state = load_state(sid)
+        learning_report.capture(root, state, learning_report.backlog.DEFAULT, budget_s=min(15.0, budget_s))
+        save_state(sid, state)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def start(data: Dict[str, Any]) -> Dict[str, Any]:
+    root = begin("codex", data)
     cfg = load_config(root)
     if cfg.get("routing", {}).get("enabled") is False:
         return {}
@@ -46,6 +76,17 @@ def start(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def stop(data: Dict[str, Any]) -> Dict[str, Any]:
+    began = time.monotonic()
+    try:
+        return verify_stop(data)
+    finally:
+        learn("codex", data, STOP_TIMEOUT - 10 - (time.monotonic() - began))
+
+
+STOP_TIMEOUT = 480  # install_native's Codex Stop hook timeout
+
+
+def verify_stop(data: Dict[str, Any]) -> Dict[str, Any]:
     root = root_for(data)
     state = load_state(state_id(data))
     if not state.get("baseline"):
@@ -97,11 +138,20 @@ def main() -> int:
         if not isinstance(data, dict) or host not in ("codex", "grok"):
             raise ValueError("invalid host or input")
         if event == "guard":
+            if host == "grok":  # fallback baseline if Grok's passive SessionStart did not run
+                with contextlib.suppress(Exception):  # the guard's answer must not depend on it
+                    begin("grok", data)
             output = guard(host, data)
         elif host == "codex" and event == "start":
             output = start(data)
         elif host == "codex" and event == "stop":
             output = stop(data)
+        elif host == "grok" and event == "start":
+            begin("grok", data)  # Grok ignores SessionStart output: record state only
+            output = {}
+        elif host == "grok" and event == "stop":
+            learn("grok", data, 25)  # passive: Grok ignores the output, the command still runs
+            output = {}
         else:
             raise ValueError("unsupported host event")
         print(json.dumps(output))

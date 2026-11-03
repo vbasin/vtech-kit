@@ -24,7 +24,8 @@ SOURCE = PLUGIN / "portable" / "kit-deliver"
 SKILLS = PLUGIN / "skills"
 MARKER = ".kit-portable"
 MANIFEST = ".kit-installed.json"
-RUNTIME_SCRIPTS = ("kit_common.py", "gates.py", "stop_verify.py", "learning.py", "bash_guard.py")
+RUNTIME_SCRIPTS = ("kit_common.py", "gates.py", "stop_verify.py", "learning.py", "bash_guard.py",
+                   "learning_report.py")
 REVIEW_REFERENCES = {
     "design-critic.md": PLUGIN / "agents/design-critic.md",
     "reviewer.md": PLUGIN / "agents/reviewer.md",

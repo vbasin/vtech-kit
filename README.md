@@ -168,8 +168,9 @@ with the user's privileges. The manual verifier and Stop hook use the same gate 
 
 Repos that use the kit send what they learned back here, so it can become a PR.
 
-1. **Capture, in each repo, automatically.** The `learning_report.py` SessionEnd hook
-   compares the repo's skills, agents, MCP servers and development dependencies (groups named dev, test, lint, docs and the like,
+1. **Capture, in each repo, automatically, on Claude Code, Codex and Grok.** Claude Code's
+   `learning_report.py` SessionEnd hook, and the Stop hooks `install_native.py` writes for
+   Codex and Grok, compare the repo's skills, agents, MCP servers and development dependencies (groups named dev, test, lint, docs and the like,
    `devDependencies`, `requirements-dev*.txt`) with what was there at SessionStart, and
    records what is new. Runtime dependencies are not recorded. Claude records improvement
    ideas with `backlog.py add` as it works. Entries hold the repo name, the kind of thing,
@@ -202,7 +203,16 @@ Turning sending on, once per machine (the VM, your laptop), in a terminal:
    from this machine.
 
 A repo adopted before this change needs `"learning": {"share": true}` added to its
-`.claude/kit.json`. If this repo is public, the issues are public too: they show repo
+`.claude/kit.json`. SessionEnd reports only what a session adds, so what a repo built
+before this hook existed is sent once by hand. From inside that repo's folder, paste and
+press Enter:
+`python3 "$(find ~/.claude/plugins -path '*kit/scripts/learning_report.py' | head -1)" backfill --claim-ideas`
+It prints what it recorded and sent. Running it by hand is the repo's consent, so it does
+not need `learning.share`; it does need the machine's target (step 2 above). It reads the
+working tree, so anything built but not yet committed on that machine is included.
+Running it again sends nothing new. `--claim-ideas`
+also tags this machine's older ideas, recorded before entries carried a repo name, with
+this repo; leave it off in all but the repo where those ideas came from. If this repo is public, the issues are public too: they show repo
 names, component names and idea text.
 
 ## Learning reusable skills
@@ -248,6 +258,13 @@ For host-neutral repository checks, place the existing gate configuration in
 `.kit/kit.json`; `.claude/kit.json` takes precedence if both exist. Run
 `python <installed-skill>/scripts/stop_verify.py --manual <changed-file>` from the target
 repo. These are explicit commands on Codex and Grok; Claude's native hooks remain separate.
+
+Learning capture needs a hook, so on Codex and Grok it comes from `install_native.py`
+(which also installs the portable skill), not from `install_portable.py` alone. A copy-only
+install captures nothing automatically; run `learning_report.py backfill` from the
+installed skill's `scripts/` instead. Which distribution each host should use next (Grok
+reading the Claude plugin, a Codex plugin) is in
+`docs/decisions/2026-11-03-learning-capture-and-distribution-across-hosts.md`.
 
 For a necessary missing capability, search existing tools, research current sources, then
 adapt or build what is needed to finish the task. Record optional improvements without

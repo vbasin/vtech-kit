@@ -9,8 +9,8 @@ reviewer, check or external connection ran.
 | Host | Installation and discovery | Native behavior |
 |---|---|---|
 | Claude Code | Marketplace plugin `kit`, or portable `.claude/skills/kit-deliver` | Plugin session, tool and Stop hooks and its reviewer agents, when enabled |
-| Codex | `install_native.py --repo PATH --host codex`; inspect `/hooks` and available agents | Project SessionStart, Bash PreToolUse and Stop hooks; four project-scoped custom reviewers |
-| Grok Build | `install_native.py --repo PATH --host grok`; inspect `grok inspect` | Project Bash PreToolUse deny hook and built-in subagents; verify explicitly before reporting |
+| Codex | `install_native.py --repo PATH --host codex`; inspect `/hooks` and available agents | Project SessionStart, Bash PreToolUse and Stop hooks (Stop also captures learning); four project-scoped custom reviewers |
+| Grok Build | `install_native.py --repo PATH --host grok`; inspect `grok inspect` | Project Bash PreToolUse deny hook, passive SessionStart and Stop hooks for learning capture, and built-in subagents; verify explicitly before reporting |
 
 Native installation also installs the portable skill. It refuses conflicting existing
 configuration files; reconcile them manually rather than overwriting user settings. It
@@ -36,6 +36,16 @@ subagents with the reviewer briefs in `references/reviewers/`; custom Grok agent
 and Claude-plugin compatibility have not been verified here. If delegation is unavailable,
 review sequentially and disclose the limitation. Do not install overlapping Claude and
 native hooks without inspecting the resulting duplicate hooks in the host.
+
+Learning capture runs on every host. Each session's start records the repo's skills,
+agents, MCP servers and development dependencies; Claude's SessionEnd, and Codex's and
+Grok's Stop (which run every turn), record what is new in `~/.vtech-kit/learning.jsonl`.
+A component already recorded for the repo, by any session on any host, is not recorded
+again. On Grok the first Bash call sets the start inventory if SessionStart did not run.
+Grok's passive hooks are expected to run their command with the output ignored; that
+is unverified until the learning check in `docs/HOST_VALIDATION.md` is run on a live
+Grok session. Sending to the kit repo needs the same two opt-ins on every host. The
+kit's own installed skills and `kit_*` agents are never reported as learned.
 
 For Codex, use the installed `kit_design_critic`, `kit_reviewer`,
 `kit_security_reviewer`, and `kit_test_runner` agents when a task warrants an independent
