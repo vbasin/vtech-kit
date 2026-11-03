@@ -295,21 +295,24 @@ python plugins/kit/scripts/install_native.py --repo /path/to/project --host grok
 
 Run the appropriate command from a checkout of this kit. The installer appends a marked
 workflow block to the target repository's `AGENTS.md` and retains its existing content.
-It refuses to replace existing different hook or agent files or a modified kit block;
-reconcile them manually if the target project already has configuration. Review and trust
+It upgrades files it wrote itself and you have not edited (hashes in `.codex/.kit-native.json`
+and `.grok/.kit-native.json`). It refuses to replace other existing hook or agent files or a
+modified kit block; reconcile those manually. Review and trust
 Codex hooks through `/hooks`; Grok project hooks
 require `/hooks-trust`. Run `grok inspect` to inspect Grok discovery.
 
 Codex gets a SessionStart policy, a Bash guard, a verification Stop hook and four reviewer
-profiles. Grok gets its documented Bash deny hook and can use native subagents with the
-portable review briefs. Grok Stop hooks are passive, so the agent must explicitly verify
-before reporting. A guard configured as `ask` is not an enforceable approval prompt in
+profiles. Grok gets a SessionStart baseline, a Bash deny hook and, from Grok 1.0.70, a Stop
+hook that verifies and can block the turn, like Codex's. Both Stop hooks also capture
+learning. Grok loads a user-level Claude kit plugin with its hooks; those stand aside, event
+by event, where `.grok/hooks/kit.json` handles the same event, so nothing runs twice. Grok
+can use native subagents with the portable review briefs. A guard configured as `ask` is not an enforceable approval prompt in
 these adapters; use the host's own permission controls. See the installed skill's
 `references/hosts.md` for availability, permissions, cloud-surface and validation limits.
 
 ### Recorded host validation
 
 See [host validation](docs/HOST_VALIDATION.md) for the tested CLI versions, actual
-Codex hook/reviewer evidence, Grok authentication blocker, and a small reproducible
-smoke procedure. Native configuration must be loaded and trusted; installing files
+Codex hook/reviewer evidence, the live Grok learning-capture check (passed on 1.0.70), and
+a small reproducible smoke procedure. Native configuration must be loaded and trusted; installing files
 alone is not evidence that hooks or named agents ran.
