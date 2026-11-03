@@ -11,7 +11,7 @@ from typing import Any, Dict
 
 from bash_guard import check
 from kit_common import changed_since, load_config, load_state, repo_root, save_state, snapshot
-from stop_verify import verify
+from stop_verify import verdict_digest, verify
 
 try:  # copied in by install_portable; absent in an older install
     import learning_report
@@ -86,11 +86,13 @@ def stop(host: str, data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 STOP_TIMEOUT = 480  # install_native's Stop hook timeout on both hosts
+GROK_STOP_VERIFIES = True  # read by kit_common.stand_aside: the plugin's Stop may step aside
 
 
 def verify_stop(host: str, data: Dict[str, Any]) -> Dict[str, Any]:
     root = root_for(data)
-    state = load_state(state_id(data, host))
+    sid = state_id(data, host)
+    state = load_state(sid)
     if not state.get("baseline"):
         return {"systemMessage": "kit verification unavailable: session baseline is missing; report unverified."}
     try:
@@ -103,8 +105,15 @@ def verify_stop(host: str, data: Dict[str, Any]) -> Dict[str, Any]:
     changed = changed_since(root, state["baseline"], state.get("edited", []))
     if not changed:
         return {}
+    # Stop fires every turn. A diff already judged clean, or whose gaps were reported, gets
+    # the same verdict again, so it is not paid for twice (as in the plugin's Stop hook).
+    digest = verdict_digest(root, changed)
+    if digest in (state.get("passed_digest"), state.get("gaps_digest")):
+        return {}
     failures, _, gaps = verify(root, cfg, changed, deadline=time.monotonic() + 440)
     if not failures:
+        state["gaps_digest" if gaps else "passed_digest"] = digest
+        save_state(sid, state)
         return {"systemMessage": "kit verification incomplete:\n" + "\n".join(gaps)} if gaps else {}
     reason = "kit verification failed or is incomplete:\n" + "\n\n".join(failures + gaps)
     reason += "\nFix applicable failures or report remaining gaps; do not claim verification passed."

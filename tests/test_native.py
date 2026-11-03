@@ -304,3 +304,24 @@ def test_grok_stop_verifies_like_codex(tmp_path):
     assert result["decision"] == "block" and "Gate failure failed" in result["reason"]
     retry = call_hook(repo, "grok", "stop", {**data, "stop_hook_active": True}, tmp_path)
     assert "decision" not in retry and "failed" in retry["systemMessage"]
+
+
+def test_native_stop_does_not_rerun_gates_on_an_unchanged_diff(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    runs = tmp_path / "runs"
+    (repo / ".kit").mkdir()
+    (repo / ".kit/kit.json").write_text(json.dumps({"verification": {"enabled": True, "gates": [
+        {"name": "count", "paths": ["*.txt", ".kit/*"],
+         "argv": [sys.executable, "-c", f"open({str(runs)!r}, 'a').write('x')"]}]}}))
+    install_native.install(repo, "grok")
+    data = {"cwd": str(repo), "sessionId": "cache", "session_id": "cache"}
+    call_hook(repo, "grok", "start", data, tmp_path)
+    (repo / "work.txt").write_text("work")
+    assert call_hook(repo, "grok", "stop", data, tmp_path) == {}
+    assert call_hook(repo, "grok", "stop", data, tmp_path) == {}
+    assert runs.read_text() == "x", "a clean verdict on the same diff is not paid for twice"
+    (repo / "work.txt").write_text("more work")
+    call_hook(repo, "grok", "stop", data, tmp_path)
+    assert runs.read_text() == "xx"

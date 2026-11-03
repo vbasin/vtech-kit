@@ -35,8 +35,10 @@ does; earlier Grok releases documented Stop as passive, so on those the skill mu
 the manual verifier before the final answer. SessionStart reads only a top-level
 `systemMessage`, so it cannot inject the routing policy. Grok also loads a user's Claude
 plugins, hooks included, with Claude's snake_case input keys alongside its own; where
-`.grok/hooks/kit.json` exists, the Claude plugin's kit hooks see `GROK_HOOK_EVENT` and exit,
-so each kit hook runs once. Grok can use available native
+`.grok/hooks/kit.json` exists, the Claude plugin's kit hooks for the events it handles
+(SessionStart, Bash PreToolUse, Stop) see `GROK_HOOK_EVENT` and exit, so each runs once;
+PostToolUse lint and SessionEnd still come from the plugin. Start and Stop step aside only
+when the installed native hook verifies at Stop, so an older native copy never removes it. Grok can use available native
 subagents with the reviewer briefs in `references/reviewers/`; custom Grok agent schemas
 have not been verified here. If delegation is unavailable,
 review sequentially and disclose the limitation. Inspect the host's hook list after
