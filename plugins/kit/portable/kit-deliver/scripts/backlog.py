@@ -304,8 +304,20 @@ def _send(path: Path, target: str, pending: List[Dict[str, Any]], run: Runner, d
                 url = issue.get("url") or f"#{issue['number']}"
             else:
                 if not labelled:  # listing a missing label succeeds empty; creating with it fails
-                    call(["label", "create", LABEL, "-R", target, "--force", "--color", "0E8A16",
-                          "--description", "Reported by a repo that uses the kit"])
+                    # `gh api`, not `gh label create`: distro packages of gh predate that command.
+                    # Look first: an account that may apply a label may not be allowed to create one.
+                    made = call(["api", f"repos/{target}/labels/{LABEL}"])
+                    if made is not None and made.returncode != 0:
+                        made = call(["api", f"repos/{target}/labels", "-f", f"name={LABEL}", "-f",
+                                     "color=0E8A16", "-f", "description=Reported by a repo that uses the kit"])
+                    if made is None:
+                        result["error"] = "out of time; entries stay queued"
+                        return
+                    said = f"{made.stdout or ''} {made.stderr or ''}"
+                    if made.returncode != 0 and "already_exists" not in said:
+                        result["error"] = ("could not create the kit-learning label: "
+                                           + (made.stderr or made.stdout or "gh api failed").strip())[:300]
+                        return
                     labelled = True
                 body = (f"{_marker(fp)}\nReported automatically by a repo that uses the kit. "
                         "Each comment is another report; the number of distinct repos named "

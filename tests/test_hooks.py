@@ -871,6 +871,13 @@ case "$1 $2" in
   "issue create") [ -n "$GH_FAIL" ] && exit 1; echo "https://github.com/o/kit/issues/7";;
   "issue comment") echo ok;;
   "issue reopen") [ -n "$GH_REOPEN_FAIL" ] && exit 1; echo ok;;
+  "api repos/o/kit/labels/kit-learning")
+    [ -n "$GH_LABEL_EXISTS" ] && { echo '{"name":"kit-learning"}'; exit 0; }
+    echo "HTTP 404" >&2; exit 1;;
+  "api repos/o/kit/labels")
+    [ -n "$GH_LABEL_RACE" ] && { echo '{"errors":[{"code":"already_exists"}]}'; exit 1; }
+    [ -n "$GH_LABEL_FAIL" ] && { echo "HTTP 403" >&2; exit 1; }
+    echo '{"name":"kit-learning"}';;
 esac
 """
 ORIGIN = "https://github.com/acme/pipeline.git"
@@ -969,7 +976,7 @@ def test_opted_in_repo_sends_new_entries_and_comments_on_repeats(
     events = end_session(repo, data_dir, tmp_path, "learn-2")
     assert [e["issue"] for e in events if e["kind"] == "synced"] == ["https://github.com/o/kit/issues/7"]
     log = gh_log(tmp_path)
-    assert "label create kit-learning -R o/kit --force" in log, "a fresh kit repo has no label to file under"
+    assert "api repos/o/kit/labels -f name=kit-learning" in log, "a fresh kit repo has no label to file under"
     assert "issue create -R o/kit --title [kit-learning] skill: trace-repro" in log
 
     # The same skill reported again is a comment that reopens a closed issue; an idea
@@ -1130,3 +1137,24 @@ def test_backfill_writes_nothing_without_a_github_origin(repo: Path, tmp_path: P
                           env={"PATH": "/usr/bin:/bin", "KIT_LEARNING_FILE": str(learning)})
     assert proc.returncode == 1 and "origin" in json.loads(proc.stdout)["error"]
     assert not learning.exists(), "recorded entries that can never be sent"
+
+
+@pytest.mark.parametrize("env,sent", [
+    ({"GH_LABEL_EXISTS": "1", "GH_LABEL_FAIL": "1"}, True),  # may apply the label, may not create one
+    ({"GH_LABEL_RACE": "1"}, True),  # another machine created it between the look and the create
+    ({"GH_LABEL_FAIL": "1"}, False),
+])
+def test_a_label_that_exists_is_fine_and_one_that_cannot_be_made_keeps_entries_queued(
+        repo: Path, data_dir: Path, tmp_path: Path, env: dict, sent: bool) -> None:
+    """Old distro builds of gh have no `gh label`; a failed label step used to pass silently
+    and then fail every issue create with "label not found"."""
+    opt_in(repo, tmp_path)
+    hook("session_start.py", {"session_id": "label", "cwd": str(repo)}, data_dir)
+    (repo / ".claude/skills/trace-repro").mkdir(parents=True)
+    (repo / ".claude/skills/trace-repro/SKILL.md").write_text("x")
+    events = end_session(repo, data_dir, tmp_path, "label", **env)
+    assert any(e["kind"] == "synced" for e in events) is sent
+    if not sent:
+        assert "issue create" not in gh_log(tmp_path)
+    if "GH_LABEL_EXISTS" in env:
+        assert "api repos/o/kit/labels -f" not in gh_log(tmp_path), "an existing label is not re-created"
