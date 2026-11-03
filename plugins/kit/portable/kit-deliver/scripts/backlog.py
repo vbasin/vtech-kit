@@ -77,13 +77,18 @@ def read_records(path: Path) -> Dict[str, Dict[str, Any]]:
             event = None
         ident = event.get("id") if isinstance(event, dict) else None
         kind = event.get("kind") if isinstance(event, dict) else None
-        if not isinstance(ident, str) or not ident or kind not in ("idea", "component", "resolution", "synced"):
+        kinds = ("idea", "component", "resolution", "synced", "claim")
+        if not isinstance(ident, str) or not ident or kind not in kinds:
             skipped += 1
         elif kind in ("idea", "component") and ident not in records:
             records[ident] = event
         elif kind == "resolution" and ident in records:
             records[ident] = {**records[ident], "status": event.get("status"),
                               "resolution_evidence": event.get("evidence")}
+        elif kind == "claim" and ident in records and not records[ident].get("repo") \
+                and isinstance(event.get("repo"), str) and SLUG.fullmatch(event["repo"]):
+            # An entry recorded before entries carried a repo, assigned to one by hand.
+            records[ident] = {**records[ident], "repo": event["repo"]}
         elif kind == "synced" and ident in records:
             records[ident] = {**records[ident], "synced_to": event.get("issue")}
         else:

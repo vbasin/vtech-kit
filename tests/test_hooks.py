@@ -1116,3 +1116,17 @@ def test_backfill_records_what_the_repo_already_had(repo: Path, tmp_path: Path) 
     assert "skill: trace-repro" in log and "an old idea" in log
     again = backfill("--claim-ideas")
     assert again["recorded"] == [] and again["claimed_ideas"] == 0, "backfill is not idempotent"
+    ideas = [r for r in backlog.read_records(learning).values() if r["kind"] == "idea"]
+    assert len(ideas) == 1 and ideas[0]["repo"] == "acme/pipeline" and ideas[0].get("synced_to"), \
+        "a claimed idea must be the original entry, sent once, not a second copy"
+
+
+def test_backfill_writes_nothing_without_a_github_origin(repo: Path, tmp_path: Path) -> None:
+    (repo / ".claude/skills/s").mkdir(parents=True)
+    (repo / ".claude/skills/s/SKILL.md").write_text("x")
+    learning = tmp_path / "learning.jsonl"
+    proc = subprocess.run([sys.executable, str(SCRIPTS / "learning_report.py"), "backfill"],
+                          cwd=repo, capture_output=True, text=True, timeout=120,
+                          env={"PATH": "/usr/bin:/bin", "KIT_LEARNING_FILE": str(learning)})
+    assert proc.returncode == 1 and "origin" in json.loads(proc.stdout)["error"]
+    assert not learning.exists(), "recorded entries that can never be sent"

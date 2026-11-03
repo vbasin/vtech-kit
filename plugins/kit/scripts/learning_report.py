@@ -214,6 +214,9 @@ def backfill(root: Path, path: Path, claim_ideas: bool = False) -> Dict[str, Any
     Then send to the machine's target. Running this by hand, inside the repo, is that
     repo's consent, so `learning.share` is not required here as it is for the hook."""
     repo = backlog.repo_slug(root)
+    if not backlog.SLUG.fullmatch(repo or ""):
+        # Entries without a repo can never be sent; write nothing rather than strand them.
+        return {"repo": "", "error": "no GitHub origin: `git remote get-url origin` must be github.com/OWNER/NAME"}
     records = list(backlog.read_records(path).values())
     known = {f"{r.get('type')}:{r.get('name')}" for r in records
              if r.get("kind") == "component" and r.get("repo") == repo}
@@ -222,16 +225,15 @@ def backfill(root: Path, path: Path, claim_ideas: bool = False) -> Dict[str, Any
         kind, name = entry.split(":", 1)
         backlog.add_component(path, kind, name, repo)
     claimed = []
-    if claim_ideas and repo:
-        taken = {r.get("claimed_from") for r in records}
+    if claim_ideas:
         for record in records:
-            if record.get("kind") == "idea" and not record.get("repo") and record["id"] not in taken:
-                backlog.append(path, {**record, "id": backlog.uuid.uuid4().hex, "repo": repo,
-                                      "claimed_from": record["id"]})
+            if record.get("kind") == "idea" and not record.get("repo"):
+                backlog.append(path, {"kind": "claim", "id": record["id"], "repo": repo,
+                                      "created_at": backlog.now()})
                 claimed.append(record["id"])
     target = backlog.report_target(path)
     sent: Dict[str, Any] = {}
-    if repo and target and repo.lower() != target.lower():
+    if target and repo.lower() != target.lower():
         sent = backlog.sync(path, target, repo)
     return {"repo": repo, "recorded": added, "claimed_ideas": len(claimed), "sync": sent or
             "not sent: this machine has no target (`backlog.py target OWNER/NAME`)"}
@@ -242,8 +244,9 @@ if __name__ == "__main__":
         found = repo_root(str(Path.cwd()))
         if found is None or backlog is None:
             sys.exit("backfill: run it inside a git checkout of the repo")
-        print(json.dumps(backfill(found, backlog.DEFAULT, "--claim-ideas" in sys.argv), indent=2))
-        sys.exit(0)
+        outcome = backfill(found, backlog.DEFAULT, "--claim-ideas" in sys.argv)
+        print(json.dumps(outcome, indent=2))
+        sys.exit(1 if outcome.get("error") else 0)
     try:
         sys.exit(main())
     except Exception:  # noqa: BLE001 — a hook must never break the session
