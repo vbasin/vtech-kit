@@ -211,7 +211,8 @@ def backfill(root: Path, path: Path, claim_ideas: bool = False) -> Dict[str, Any
     because it was there when the session started. Built by sessions before this hook
     existed, it is still what the repo learned. Ideas recorded before entries carried a
     repo are claimed for this repo only when asked, since nothing says where they came from.
-    Then send, under the same two opt-ins as the hook."""
+    Then send to the machine's target. Running this by hand, inside the repo, is that
+    repo's consent, so `learning.share` is not required here as it is for the hook."""
     repo = backlog.repo_slug(root)
     records = list(backlog.read_records(path).values())
     known = {f"{r.get('type')}:{r.get('name')}" for r in records
@@ -228,14 +229,12 @@ def backfill(root: Path, path: Path, claim_ideas: bool = False) -> Dict[str, Any
                 backlog.append(path, {**record, "id": backlog.uuid.uuid4().hex, "repo": repo,
                                       "claimed_from": record["id"]})
                 claimed.append(record["id"])
-    learning = load_config(root).get("learning")
     target = backlog.report_target(path)
     sent: Dict[str, Any] = {}
-    if isinstance(learning, dict) and learning.get("share") is True and repo and target \
-            and repo.lower() != target.lower():
+    if repo and target and repo.lower() != target.lower():
         sent = backlog.sync(path, target, repo)
     return {"repo": repo, "recorded": added, "claimed_ideas": len(claimed), "sync": sent or
-            "not sent: needs `backlog.py target OWNER/NAME` and learning.share in .claude/kit.json"}
+            "not sent: this machine has no target (`backlog.py target OWNER/NAME`)"}
 
 
 if __name__ == "__main__":

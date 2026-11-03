@@ -206,7 +206,10 @@ A repo adopted before this change needs `"learning": {"share": true}` added to i
 before this hook existed is sent once by hand. From inside that repo's folder, paste and
 press Enter:
 `python3 "$(find ~/.claude/plugins -path '*kit/scripts/learning_report.py' | head -1)" backfill --claim-ideas`
-It prints what it recorded and sent. Running it again sends nothing new. `--claim-ideas`
+It prints what it recorded and sent. Running it by hand is the repo's consent, so it does
+not need `learning.share`; it does need the machine's target (step 2 above). It reads the
+working tree, so anything built but not yet committed on that machine is included.
+Running it again sends nothing new. `--claim-ideas`
 also tags this machine's older ideas, recorded before entries carried a repo name, with
 this repo; leave it off in all but the repo where those ideas came from. If this repo is public, the issues are public too: they show repo
 names, component names and idea text.
