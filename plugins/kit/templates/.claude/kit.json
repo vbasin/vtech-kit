@@ -20,6 +20,9 @@
     "pytest_full_suite": "off",
     "patterns": []
   },
+  "learning": {
+    "report_to": "vbasin/vtech-kit"
+  },
   "routing": {
     "enabled": true,
     "note": "",

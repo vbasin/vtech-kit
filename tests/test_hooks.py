@@ -861,3 +861,92 @@ def test_a_gap_notice_never_says_the_checks_passed(repo: Path, data_dir: Path) -
     (repo / "README.md").write_text("docs\n")
     message = hook("stop_verify.py", base, data_dir)["systemMessage"]
     assert "INCOMPLETE" in message and "passed" not in message
+
+
+# ── learning report (SessionEnd) ───────────────────────────────────────────────
+FAKE_GH = """#!/bin/sh
+echo "$@" >> "$GH_LOG"
+case "$1 $2" in
+  "issue list") [ -n "$GH_FAIL" ] && exit 1; cat "$GH_ISSUES" 2>/dev/null || echo "[]";;
+  "issue create") [ -n "$GH_FAIL" ] && exit 1; echo "https://github.com/o/kit/issues/7";;
+  "issue comment") echo ok;;
+esac
+"""
+
+
+def end_session(repo: Path, data_dir: Path, tmp_path: Path, sid: str, **env: str) -> list:
+    """Run the SessionEnd hook with a fake `gh`; return the backlog records."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "gh").write_text(FAKE_GH)
+    (bin_dir / "gh").chmod(0o755)
+    learning = tmp_path / "learning.jsonl"
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS / "learning_report.py")],
+        input=json.dumps({"session_id": sid, "cwd": str(repo)}), capture_output=True, text=True,
+        timeout=120, env={"CLAUDE_PLUGIN_DATA": str(data_dir), "PATH": f"{bin_dir}:/usr/bin:/bin",
+                          "KIT_LEARNING_FILE": str(learning), "GH_LOG": str(tmp_path / "gh.log"), **env},
+    )
+    assert proc.returncode == 0 and proc.stdout == "", proc.stderr
+    if not learning.exists():
+        return []
+    return [json.loads(line) for line in learning.read_text().splitlines()]
+
+
+def test_session_end_records_what_the_session_added(repo: Path, data_dir: Path, tmp_path: Path) -> None:
+    sh(repo, "git", "remote", "add", "origin", "git@github.com:acme/pipeline.git")
+    (repo / "requirements.txt").write_text("requests==2.0\n")
+    commit(repo, "deps")
+    base = {"session_id": "learn-1", "cwd": str(repo)}
+    hook("session_start.py", base, data_dir)
+    (repo / ".claude/skills/trace-repro").mkdir(parents=True)
+    (repo / ".claude/skills/trace-repro/SKILL.md").write_text("---\nname: trace-repro\n---\n")
+    (repo / ".claude/agents").mkdir()
+    (repo / ".claude/agents/sql-checker.md").write_text("---\nname: sql-checker\n---\n")
+    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"playwright": {"command": "npx"}}}))
+    (repo / "requirements.txt").write_text("requests==2.0\nhttpx>=0.27\n# comment\n")
+    events = end_session(repo, data_dir, tmp_path, "learn-1")
+    got = {(e["type"], e["name"], e["repo"]) for e in events if e["kind"] == "component"}
+    assert got == {("skill", "trace-repro", "acme/pipeline"), ("agent", "sql-checker", "acme/pipeline"),
+                   ("mcp-server", "playwright", "acme/pipeline"), ("dependency", "httpx", "acme/pipeline")}
+    assert not (tmp_path / "gh.log").exists(), "sent without the repo opting in"
+    assert len(end_session(repo, data_dir, tmp_path, "learn-1")) == len(events), "recorded twice"
+
+
+def test_opted_in_repo_sends_new_entries_and_comments_on_repeats(
+        repo: Path, data_dir: Path, tmp_path: Path) -> None:
+    set_config(repo, learning={"report_to": "o/kit"})
+    commit(repo, "opt in")
+    hook("session_start.py", {"session_id": "learn-2", "cwd": str(repo)}, data_dir)
+    (repo / ".claude/skills/trace-repro").mkdir(parents=True)
+    (repo / ".claude/skills/trace-repro/SKILL.md").write_text("x")
+    events = end_session(repo, data_dir, tmp_path, "learn-2")
+    assert [e["issue"] for e in events if e["kind"] == "synced"] == ["https://github.com/o/kit/issues/7"]
+    log = (tmp_path / "gh.log").read_text()
+    assert "issue create -R o/kit --title [kit-learning] skill: trace-repro" in log
+
+    # The same skill from another repo is a comment on that issue, not a new issue.
+    sys.path.insert(0, str(SCRIPTS.parent / "portable" / "kit-deliver" / "scripts"))
+    import backlog
+    fp = backlog.fingerprint({"kind": "component", "type": "skill", "name": "Trace-Repro"})
+    issues = tmp_path / "issues.json"
+    issues.write_text(json.dumps([{"number": 7, "url": "u7", "body": f"<!-- kit-learning:{fp} -->"}]))
+    learning = tmp_path / "learning.jsonl"
+    backlog.add_component(learning, "skill", "trace-repro", "acme/other")
+    (tmp_path / "gh.log").unlink()
+    hook("session_start.py", {"session_id": "learn-3", "cwd": str(repo)}, data_dir)
+    end_session(repo, data_dir, tmp_path, "learn-3", GH_ISSUES=str(issues))
+    log = (tmp_path / "gh.log").read_text()
+    assert "issue comment 7 -R o/kit" in log and "issue create" not in log
+
+
+def test_a_failed_send_stays_queued(repo: Path, data_dir: Path, tmp_path: Path) -> None:
+    set_config(repo, learning={"report_to": "o/kit"})
+    commit(repo, "opt in")
+    hook("session_start.py", {"session_id": "learn-4", "cwd": str(repo)}, data_dir)
+    (repo / ".claude/agents").mkdir()
+    (repo / ".claude/agents/a.md").write_text("x")
+    events = end_session(repo, data_dir, tmp_path, "learn-4", GH_FAIL="1")
+    assert [e["kind"] for e in events] == ["component"], "an entry was marked sent when sending failed"
+    events = end_session(repo, data_dir, tmp_path, "learn-4")
+    assert [e["kind"] for e in events] == ["component", "synced"], "the queued entry was not retried"
