@@ -305,8 +305,11 @@ def _send(path: Path, target: str, pending: List[Dict[str, Any]], run: Runner, d
             else:
                 if not labelled:  # listing a missing label succeeds empty; creating with it fails
                     # `gh api`, not `gh label create`: distro packages of gh predate that command.
-                    made = call(["api", f"repos/{target}/labels", "-f", f"name={LABEL}", "-f", "color=0E8A16",
-                                 "-f", "description=Reported by a repo that uses the kit"])
+                    # Look first: an account that may apply a label may not be allowed to create one.
+                    made = call(["api", f"repos/{target}/labels/{LABEL}"])
+                    if made is not None and made.returncode != 0:
+                        made = call(["api", f"repos/{target}/labels", "-f", f"name={LABEL}", "-f",
+                                     "color=0E8A16", "-f", "description=Reported by a repo that uses the kit"])
                     if made is None:
                         result["error"] = "out of time; entries stay queued"
                         return

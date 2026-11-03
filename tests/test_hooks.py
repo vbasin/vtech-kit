@@ -871,8 +871,11 @@ case "$1 $2" in
   "issue create") [ -n "$GH_FAIL" ] && exit 1; echo "https://github.com/o/kit/issues/7";;
   "issue comment") echo ok;;
   "issue reopen") [ -n "$GH_REOPEN_FAIL" ] && exit 1; echo ok;;
+  "api repos/o/kit/labels/kit-learning")
+    [ -n "$GH_LABEL_EXISTS" ] && { echo '{"name":"kit-learning"}'; exit 0; }
+    echo "HTTP 404" >&2; exit 1;;
   "api repos/o/kit/labels")
-    [ -n "$GH_LABEL_EXISTS" ] && { echo '{"errors":[{"code":"already_exists"}]}'; exit 1; }
+    [ -n "$GH_LABEL_RACE" ] && { echo '{"errors":[{"code":"already_exists"}]}'; exit 1; }
     [ -n "$GH_LABEL_FAIL" ] && { echo "HTTP 403" >&2; exit 1; }
     echo '{"name":"kit-learning"}';;
 esac
@@ -1136,7 +1139,11 @@ def test_backfill_writes_nothing_without_a_github_origin(repo: Path, tmp_path: P
     assert not learning.exists(), "recorded entries that can never be sent"
 
 
-@pytest.mark.parametrize("env,sent", [({"GH_LABEL_EXISTS": "1"}, True), ({"GH_LABEL_FAIL": "1"}, False)])
+@pytest.mark.parametrize("env,sent", [
+    ({"GH_LABEL_EXISTS": "1", "GH_LABEL_FAIL": "1"}, True),  # may apply the label, may not create one
+    ({"GH_LABEL_RACE": "1"}, True),  # another machine created it between the look and the create
+    ({"GH_LABEL_FAIL": "1"}, False),
+])
 def test_a_label_that_exists_is_fine_and_one_that_cannot_be_made_keeps_entries_queued(
         repo: Path, data_dir: Path, tmp_path: Path, env: dict, sent: bool) -> None:
     """Old distro builds of gh have no `gh label`; a failed label step used to pass silently
@@ -1149,3 +1156,5 @@ def test_a_label_that_exists_is_fine_and_one_that_cannot_be_made_keeps_entries_q
     assert any(e["kind"] == "synced" for e in events) is sent
     if not sent:
         assert "issue create" not in gh_log(tmp_path)
+    if "GH_LABEL_EXISTS" in env:
+        assert "api repos/o/kit/labels -f" not in gh_log(tmp_path), "an existing label is not re-created"
