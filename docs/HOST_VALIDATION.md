@@ -200,7 +200,8 @@ Passed. Run headless with `grok --trust --permission-mode acceptEdits --allow 'W
 "<the prompt above>"` (without `--allow 'Write'` a headless run refuses the write, since it
 cannot ask for approval). The log held one line:
 `{"kind":"component","type":"skill","name":"check-skill","repo":"acme/check","status":"proposed",...}`.
-So a live Grok session runs the native SessionStart and Stop commands. Doubling was settled
+So live capture works on Grok: the native Stop ran and recorded the new skill. This does
+not show which hook set the start inventory, SessionStart or the first-Bash-call fallback. Doubling was settled
 earlier the same day: `grok inspect` did list the Claude plugin's hooks too, and the plugin's
-hooks now stand aside per event (`kit_common.stand_aside`). Codex's live run is still pending
-until its hooks are trusted in the VS Code extension.
+hooks now stand aside per event (`kit_common.stand_aside`). Codex's hooks were trusted in the VS Code extension the
+same day; only its live run is still pending.
