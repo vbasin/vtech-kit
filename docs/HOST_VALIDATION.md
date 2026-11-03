@@ -168,3 +168,28 @@ Relevant evidence files under its `evidence/` directory:
 
 The earlier `codex-discovery` and `codex-hooks` logs used
 `--ignore-user-config`; retain them as diagnostic evidence of that limitation.
+
+## Learning capture check (pending, added 2026-11-03)
+
+Tests cover the Codex and Grok capture hooks by calling them directly. What they cannot
+show is whether a live host calls them: Codex's Stop is documented to run every turn, and
+Grok documents SessionStart and Stop as passive (output ignored) without saying whether the
+command still runs. This check answers that, and whether a user-level Claude kit plugin
+doubles Grok's hooks. Nothing is sent anywhere: the log goes to a scratch file and no
+target is set for it.
+
+In a terminal on the machine with Codex or Grok signed in, paste each line and press Enter:
+
+1. `mkdir -p ~/kit-learning-check && cd ~/kit-learning-check && git init -q && git remote add origin https://github.com/acme/check.git`
+2. `python3 /path/to/vtech-kit/plugins/kit/scripts/install_native.py --repo . --host grok`
+   (or `--host codex`; replace `/path/to/vtech-kit` with where the kit is checked out).
+3. `export KIT_LEARNING_FILE=~/kit-learning-check.jsonl`
+4. Start the host in this folder (`grok` or `codex`), trust the project hooks when asked
+   (`/hooks-trust` on Grok, `/hooks` on Codex), and type:
+   `Create .agents/skills/check-skill/SKILL.md with a name and description, then stop.`
+5. Quit the host, then run `cat ~/kit-learning-check.jsonl`.
+
+Pass: one line containing `"name": "check-skill"`. No file, or no such line, means the
+host did not run the hooks; record which. For the doubling question on Grok, also run
+`grok inspect` and note whether `SessionStart` and `Stop` are listed twice (once from
+`.grok/hooks/kit.json`, once from a Claude kit plugin).

@@ -43,6 +43,8 @@ except Exception:  # noqa: BLE001 — a partial install must not break the sessi
 
 # Installed by the kit itself (install_portable.py), so not something the repo learned.
 OWN = {"kit-deliver"} | {p.parent.name for p in (PLUGIN / "skills").glob("*/.kit-portable")}
+INSTALLED = ".kit-installed.json"  # install_portable.MANIFEST
+NATIVE_AGENT_PREFIX = "kit_"  # install_native.ROLES: the Codex reviewers it writes
 DEV_REQUIREMENTS = re.compile(
     r"(?:requirements[\w.-]*(?:dev|test|lint|doc)[\w.-]*|(?:dev|test)[\w-]*requirements)\.txt")
 MAX_MANIFESTS = 200
@@ -164,10 +166,12 @@ def inventory(root: Path) -> List[str]:
     found: Set[str] = set()
     for host in (".claude", ".agents", ".grok"):
         for skill in (root / host / "skills").glob("*/SKILL.md"):
-            if skill.parent.name not in OWN:
+            # A directory the kit's installer wrote carries its manifest: not learned here.
+            if skill.parent.name not in OWN and not (skill.parent / INSTALLED).exists():
                 found.add(f"skill:{skill.parent.name}")
     found.update(f"agent:{p.stem}" for p in (root / ".claude" / "agents").glob("*.md"))
-    found.update(f"agent:{p.stem}" for p in (root / ".codex" / "agents").glob("*.toml"))
+    found.update(f"agent:{p.stem}" for p in (root / ".codex" / "agents").glob("*.toml")
+                 if not p.stem.startswith(NATIVE_AGENT_PREFIX))
     found.update(f"mcp-server:{n}" for n in _json_keys(_read(root / ".mcp.json"), "mcpServers"))
     for rel in _manifests(root):
         text, name = _read(root / rel), Path(rel).name
@@ -181,28 +185,45 @@ def inventory(root: Path) -> List[str]:
     return sorted(e for e in found if backlog.NAME.fullmatch(e.split(":", 1)[1]))
 
 
+def recorded(path: Path, repo: str) -> Set[str]:
+    """Components already in the log for this repo, from any session on any host."""
+    return {f"{r.get('type')}:{r.get('name')}" for r in backlog.read_records(path).values()
+            if r.get("kind") == "component" and r.get("repo") == repo}
+
+
+def capture(root: Path, state: Dict[str, Any], path: Path, budget_s: float = 40.0) -> None:
+    """Record what this session added since its SessionStart inventory, then send the repo's
+    queue if both opt-ins hold. Shared by every host's end-of-session (or end-of-turn) hook:
+    Claude's SessionEnd here, Codex's and Grok's Stop in `native_hook.py`. Safe to repeat:
+    what this session or any other already recorded for the repo is skipped. Updates `state`;
+    the caller saves it."""
+    repo = backlog.repo_slug(root)
+    if isinstance(state.get("components"), list):  # absent: started before this hook existed
+        before = set(state["components"]) | set(state.get("reported", []))
+        added = [e for e in inventory(root) if e not in before]
+        if added:
+            known = recorded(path, repo)
+            for entry in added:
+                if entry not in known:
+                    kind, name = entry.split(":", 1)
+                    backlog.add_component(path, kind, name, repo)
+        state["reported"] = sorted(set(state.get("reported", [])) | set(added))
+    learning = load_config(root).get("learning")
+    target = backlog.report_target(path)
+    if isinstance(learning, dict) and learning.get("share") is True and repo and target \
+            and repo.lower() != target.lower():  # the kit repo does not report to itself
+        backlog.sync(path, target, repo, budget_s=budget_s)
+
+
 def main(backlog_file: Optional[Path] = None) -> int:
     data: Dict[str, Any] = read_input()
     session_id = str(data.get("session_id") or "")
     root = repo_root(data.get("cwd"))
     if root is None or not session_id or backlog is None:
         return 0
-    path = backlog_file or backlog.DEFAULT
     state = load_state(session_id)
-    repo = backlog.repo_slug(root)
-    if isinstance(state.get("components"), list):  # absent: started before this hook existed
-        before = set(state["components"]) | set(state.get("reported", []))
-        added = [e for e in inventory(root) if e not in before]
-        for entry in added:
-            kind, name = entry.split(":", 1)
-            backlog.add_component(path, kind, name, repo)
-        state["reported"] = sorted(set(state.get("reported", [])) | set(added))
-        save_state(session_id, state)
-    learning = load_config(root).get("learning")
-    target = backlog.report_target(path)
-    if isinstance(learning, dict) and learning.get("share") is True and repo and target \
-            and repo.lower() != target.lower():  # the kit repo does not report to itself
-        backlog.sync(path, target, repo)
+    capture(root, state, backlog_file or backlog.DEFAULT)
+    save_state(session_id, state)
     return 0
 
 
@@ -218,8 +239,7 @@ def backfill(root: Path, path: Path, claim_ideas: bool = False) -> Dict[str, Any
         # Entries without a repo can never be sent; write nothing rather than strand them.
         return {"repo": "", "error": "no GitHub origin: `git remote get-url origin` must be github.com/OWNER/NAME"}
     records = list(backlog.read_records(path).values())
-    known = {f"{r.get('type')}:{r.get('name')}" for r in records
-             if r.get("kind") == "component" and r.get("repo") == repo}
+    known = recorded(path, repo)
     added = [e for e in inventory(root) if e not in known]
     for entry in added:
         kind, name = entry.split(":", 1)

@@ -168,8 +168,9 @@ with the user's privileges. The manual verifier and Stop hook use the same gate 
 
 Repos that use the kit send what they learned back here, so it can become a PR.
 
-1. **Capture, in each repo, automatically.** The `learning_report.py` SessionEnd hook
-   compares the repo's skills, agents, MCP servers and development dependencies (groups named dev, test, lint, docs and the like,
+1. **Capture, in each repo, automatically, on Claude Code, Codex and Grok.** Claude Code's
+   `learning_report.py` SessionEnd hook, and the Stop hooks `install_native.py` writes for
+   Codex and Grok, compare the repo's skills, agents, MCP servers and development dependencies (groups named dev, test, lint, docs and the like,
    `devDependencies`, `requirements-dev*.txt`) with what was there at SessionStart, and
    records what is new. Runtime dependencies are not recorded. Claude records improvement
    ideas with `backlog.py add` as it works. Entries hold the repo name, the kind of thing,
@@ -257,6 +258,13 @@ For host-neutral repository checks, place the existing gate configuration in
 `.kit/kit.json`; `.claude/kit.json` takes precedence if both exist. Run
 `python <installed-skill>/scripts/stop_verify.py --manual <changed-file>` from the target
 repo. These are explicit commands on Codex and Grok; Claude's native hooks remain separate.
+
+Learning capture needs a hook, so on Codex and Grok it comes from `install_native.py`
+(which also installs the portable skill), not from `install_portable.py` alone. A copy-only
+install captures nothing automatically; run `learning_report.py backfill` from the
+installed skill's `scripts/` instead. Which distribution each host should use next (Grok
+reading the Claude plugin, a Codex plugin) is in
+`docs/decisions/2026-11-03-learning-capture-and-distribution-across-hosts.md`.
 
 For a necessary missing capability, search existing tools, research current sources, then
 adapt or build what is needed to finish the task. Record optional improvements without

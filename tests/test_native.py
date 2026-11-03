@@ -179,3 +179,78 @@ def test_codex_stop_reports_gaps_alongside_failures(tmp_path):
     result = call_hook(repo, "codex", "stop", data, tmp_path)
     assert result["decision"] == "block" and "Gate failure failed" in result["reason"]
     assert "notes.md" in result["reason"], "the uncovered file vanished behind the failure"
+
+
+def _origin_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/acme/pipeline.git"],
+                   check=True)
+    return repo
+
+
+def _components(learning):
+    if not learning.exists():
+        return []
+    return sorted(f"{r['type']}:{r['name']}" for r in map(json.loads, learning.read_text().splitlines())
+                  if r.get("kind") == "component")
+
+
+def test_codex_and_grok_capture_what_the_session_added_once(tmp_path, monkeypatch):
+    """Learning capture is not Claude-only: Codex's Stop and Grok's Stop record what the
+    session added, the kit's own installed files are not mistaken for it, and a component
+    seen by both hosts is recorded once."""
+    learning = tmp_path / "learning.jsonl"
+    monkeypatch.setenv("KIT_LEARNING_FILE", str(learning))
+    repo = _origin_repo(tmp_path)
+    assert install_native.install(repo, "codex") == "installed"
+    assert install_native.install(repo, "grok") == "installed"
+    installed = repo / ".agents/skills/kit-deliver/scripts/learning_report.py"
+    assert installed.is_file(), "the copied runtime must carry the capture code"
+    hooks = json.loads((repo / ".grok/hooks/kit.json").read_text())["hooks"]
+    assert {"SessionStart", "PreToolUse", "Stop"} == set(hooks)
+
+    codex = {"cwd": str(repo), "session_id": "c1"}
+    grok = {"cwd": str(repo), "sessionId": "g1"}
+    call_hook(repo, "codex", "start", codex, tmp_path)
+    assert call_hook(repo, "grok", "start", grok, tmp_path) == {}
+    skill = repo / ".agents/skills/trace-repro"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: trace-repro\ndescription: d\n---\n")
+    call_hook(repo, "codex", "stop", codex, tmp_path)
+    assert _components(learning) == ["skill:trace-repro"], "kit_* agents and kit skills are the kit's, not learned"
+    call_hook(repo, "codex", "stop", codex, tmp_path)  # Stop runs every turn
+    assert call_hook(repo, "grok", "stop", grok, tmp_path) == {}
+    assert _components(learning) == ["skill:trace-repro"], "a repeat or a second host must not re-record"
+
+    (repo / ".codex/agents").mkdir(exist_ok=True)
+    (repo / ".codex/agents/triage.toml").write_text('name = "triage"\n')
+    call_hook(repo, "grok", "stop", grok, tmp_path)
+    assert _components(learning) == ["agent:triage", "skill:trace-repro"]
+
+
+def test_learning_never_changes_the_codex_stop_answer(tmp_path, monkeypatch):
+    monkeypatch.setenv("KIT_LEARNING_FILE", str(tmp_path / "no-such-dir" / "x" / "learning.jsonl"))
+    repo = _origin_repo(tmp_path)
+    install_native.install(repo, "codex")
+    data = {"cwd": str(repo), "session_id": "c2"}
+    call_hook(repo, "codex", "start", data, tmp_path)
+    (tmp_path / "no-such-dir").write_text("a file where the log's folder should be")
+    (repo / ".agents/skills/new").mkdir(parents=True)
+    (repo / ".agents/skills/new/SKILL.md").write_text("---\nname: new\ndescription: d\n---\n")
+    assert call_hook(repo, "codex", "stop", data, tmp_path) == {}
+
+
+def test_grok_first_bash_call_sets_the_baseline_when_start_did_not_run(tmp_path, monkeypatch):
+    learning = tmp_path / "learning.jsonl"
+    monkeypatch.setenv("KIT_LEARNING_FILE", str(learning))
+    repo = _origin_repo(tmp_path)
+    install_native.install(repo, "grok")
+    data = {"cwd": str(repo), "sessionId": "g2", "toolInput": {"command": "ls"}}
+    assert call_hook(repo, "grok", "guard", data, tmp_path) == {}
+    (repo / ".grok/skills/notes").mkdir(parents=True)
+    (repo / ".grok/skills/notes/SKILL.md").write_text("---\nname: notes\ndescription: d\n---\n")
+    call_hook(repo, "grok", "guard", data, tmp_path)  # a later call must not move the baseline
+    call_hook(repo, "grok", "stop", data, tmp_path)
+    assert _components(learning) == ["skill:notes"]

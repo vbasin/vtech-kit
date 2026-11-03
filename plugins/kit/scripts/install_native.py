@@ -55,8 +55,12 @@ def desired(host: str) -> Dict[str, str]:
         return {".codex/hooks.json": json.dumps({"hooks": groups}, indent=2) + "\n", **agent_files()}
     if host == "grok":
         script = 'python3 "$(git rev-parse --show-toplevel)/.grok/skills/kit-deliver/scripts/native_hook.py"'
-        hooks = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
-            {"type": "command", "command": script + " grok guard", "timeout": 15}]}]}}
+        hooks = {"hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": script + " grok start", "timeout": 30}]}],
+            "PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": script + " grok guard", "timeout": 15}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": script + " grok stop", "timeout": 30}]}],
+        }}
         return {".grok/hooks/kit.json": json.dumps(hooks, indent=2) + "\n"}
     raise ValueError("host must be codex or grok")
 
