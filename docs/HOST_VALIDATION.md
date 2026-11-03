@@ -3,7 +3,7 @@
 Date uses America/Chicago. Tests ran on a Linux ARM64 machine against the merged
 PR #13 source, `c5a90c2cb30c8f6296c39e5bee94bd6af685e6c5`, followed by the four
 review fixes in this change. The merge is already on `main`; its
-[GitHub validation run passed](https://github.com/vbasin/claude-kit/actions/runs/41002247871).
+[GitHub validation run passed](https://github.com/vbasin/vtech-kit/actions/runs/41002247871).
 
 ## Observed behavior
 

@@ -1,4 +1,4 @@
-# claude-kit
+# vtech-kit
 
 This repo is a Claude Code plugin marketplace (`vtech-kit`) consumed by other repos. See README.md for the layout.
 
