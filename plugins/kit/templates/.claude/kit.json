@@ -20,6 +20,9 @@
     "pytest_full_suite": "off",
     "patterns": []
   },
+  "learning": {
+    "share": true
+  },
   "routing": {
     "enabled": true,
     "note": "",

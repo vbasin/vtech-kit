@@ -3,6 +3,6 @@
   "displayName": "Quant research",
   "description": "Reviewers for quantitative research code: look-ahead leakage and causality, and SQL/TimescaleDB query efficiency and safety.",
   "author": { "name": "vbasin" },
-  "repository": "https://github.com/vbasin/claude-kit",
+  "repository": "https://github.com/vbasin/vtech-kit",
   "keywords": ["quant", "leakage", "timescaledb", "review"]
 }

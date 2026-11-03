@@ -182,5 +182,6 @@ def test_the_suite_covers_what_the_kit_claims() -> None:
         "the improvement loop never runs ahead of the user's task": "task-first",
         "a missing prerequisite is obtained during the task, not deferred": "capability-required",
         "a reusable candidate is scored against a baseline before it is shared": "reusable-capability",
+        "learning reported by other repos becomes a scored PR, most-reported first": "learning-becomes-a-pr",
     }.items():
         assert case in names, f"no case covers: {claim}"

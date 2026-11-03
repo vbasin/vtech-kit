@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "extraKnownMarketplaces": {
     "vtech-kit": {
-      "source": { "source": "github", "repo": "vbasin/claude-kit" }
+      "source": { "source": "github", "repo": "vbasin/vtech-kit" }
     }
   },
   "enabledPlugins": {
