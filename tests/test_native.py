@@ -325,3 +325,24 @@ def test_native_stop_does_not_rerun_gates_on_an_unchanged_diff(tmp_path):
     (repo / "work.txt").write_text("more work")
     call_hook(repo, "grok", "stop", data, tmp_path)
     assert runs.read_text() == "xx"
+
+
+def test_grok_session_end_stop_does_no_work(tmp_path):
+    """Grok fires one more Stop at session end, capped near 1.5 s and ignored; only
+    `reason == "end_turn"` is a real turn end."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    runs = tmp_path / "runs"
+    (repo / ".kit").mkdir()
+    (repo / ".kit/kit.json").write_text(json.dumps({"verification": {"enabled": True, "gates": [
+        {"name": "count", "paths": ["*.txt"],
+         "argv": [sys.executable, "-c", f"open({str(runs)!r}, 'a').write('x')"]}]}}))
+    install_native.install(repo, "grok")
+    data = {"cwd": str(repo), "sessionId": "end", "session_id": "end"}
+    call_hook(repo, "grok", "start", data, tmp_path)
+    (repo / "work.txt").write_text("work")
+    assert call_hook(repo, "grok", "stop", {**data, "reason": "session_end"}, tmp_path) == {}
+    assert not runs.exists()
+    call_hook(repo, "grok", "stop", {**data, "reason": "end_turn"}, tmp_path)
+    assert runs.read_text() == "x"

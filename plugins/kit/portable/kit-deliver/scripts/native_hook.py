@@ -78,6 +78,11 @@ def start(data: Dict[str, Any]) -> Dict[str, Any]:
 def stop(host: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """Codex, and Grok from 1.0.70 (whose Stop can block with Claude's output format), both
     get verification here, then learning capture in the time left."""
+    if host == "grok" and data.get("reason") not in (None, "end_turn"):
+        # Grok's extra observe-only Stop at session end runs under a ~1.5 s cap with its answer
+        # ignored: a gate or a `gh` send started now would be killed part-way. The previous
+        # turn's Stop already verified and captured.
+        return {}
     began = time.monotonic()
     try:
         return verify_stop(host, data)
