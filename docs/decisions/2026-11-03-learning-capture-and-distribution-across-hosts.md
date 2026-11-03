@@ -77,3 +77,26 @@ All but the last are fixed here; the last is a check in the probe.
   drop the Codex plugin and keep D2 with a better installer.
 - The Claude plugin adds more than about 1k tokens per Grok session, or its hooks double-fire
   with `.grok/hooks/kit.json`: give Grok a thin generated plugin instead.
+
+## Addendum, same day: what the VM showed
+
+Running the install on V's VM (Grok 1.0.70) answered two of the open questions. The
+answers come from Grok's built-in docs and `grok inspect`; no live model session was run.
+
+- **Grok loads the Claude plugin, hooks included.** `grok inspect` listed the kit
+  plugin's hooks file alongside `.grok/hooks/kit.json`, so SessionStart, the Bash guard
+  and Stop each ran twice. Grok's `compat.claude.hooks` switch covers only hooks in
+  Claude's settings files, not a plugin's, and there is no per-plugin hook switch.
+- **Grok's Stop can block** in Claude's format, and every hook gets Claude's snake_case
+  keys as well as Grok's own camelCase ones. Grok sets `GROK_HOOK_EVENT` on every hook.
+
+What changed:
+- The plugin's hooks exit when `GROK_HOOK_EVENT` is set and `.grok/hooks/kit.json` exists
+  (`kit_common.stand_aside`).
+- The native Grok Stop now verifies, like Codex's, with a 480-second timeout.
+
+Native beats plugin under Grok because it is the one written for Grok. It is also the one
+present when a repo is installed for Grok on a machine without the Claude plugin. The
+reversal condition "double-fires with `.grok/hooks/kit.json`" is met. The thin
+`.grok-plugin` it pointed to is not needed while this dedupe holds. Revisit if Grok stops
+setting `GROK_HOOK_EVENT`, or starts translating payloads differently for plugin hooks.

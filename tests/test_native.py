@@ -281,3 +281,26 @@ def test_install_upgrades_its_own_unchanged_files_and_keeps_edited_ones(tmp_path
     with pytest.raises(ValueError, match="reconcile"):
         install_native.install(repo, "grok")
     assert (repo / ".grok/hooks/kit.json").read_text() == '{"mine": true}\n'
+
+
+def test_grok_stop_verifies_like_codex(tmp_path):
+    """Grok 1.0.70's Stop can block in Claude's format, so the native Grok Stop verifies."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".kit").mkdir()
+    (repo / ".kit/kit.json").write_text(json.dumps({"verification": {"enabled": True, "gates": [
+        {"name": "failure", "paths": ["*.txt"], "argv": [sys.executable, "-c", "raise SystemExit(1)"]}]}}))
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=test", "-c", "user.email=t@t", "commit", "-qm", "base"],
+                   check=True)
+    install_native.install(repo, "grok")
+    hooks = json.loads((repo / ".grok/hooks/kit.json").read_text())["hooks"]
+    assert hooks["Stop"][0]["hooks"][0]["timeout"] == 480
+    data = {"cwd": str(repo), "sessionId": "g-verify", "session_id": "g-verify"}
+    assert call_hook(repo, "grok", "start", data, tmp_path) == {}
+    (repo / "work.txt").write_text("work")
+    result = call_hook(repo, "grok", "stop", data, tmp_path)
+    assert result["decision"] == "block" and "Gate failure failed" in result["reason"]
+    retry = call_hook(repo, "grok", "stop", {**data, "stop_hook_active": True}, tmp_path)
+    assert "decision" not in retry and "failed" in retry["systemMessage"]

@@ -1158,3 +1158,20 @@ def test_a_label_that_exists_is_fine_and_one_that_cannot_be_made_keeps_entries_q
         assert "issue create" not in gh_log(tmp_path)
     if "GH_LABEL_EXISTS" in env:
         assert "api repos/o/kit/labels -f" not in gh_log(tmp_path), "an existing label is not re-created"
+
+
+@pytest.mark.parametrize("native,quiet", [(True, True), (False, False)])
+def test_plugin_hooks_stand_aside_for_the_native_grok_hooks(
+        repo: Path, data_dir: Path, native: bool, quiet: bool) -> None:
+    """Grok loads Claude plugins, hooks included. Where install_native.py wrote Grok's own
+    hooks, the plugin's copy must not run a second time; elsewhere it still runs."""
+    if native:
+        (repo / ".grok/hooks").mkdir(parents=True)
+        (repo / ".grok/hooks/kit.json").write_text("{}")
+    payload = {"session_id": "grok-dup", "cwd": str(repo), "tool_input": {"command": "psql -c 'DROP TABLE t'"}}
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS / "bash_guard.py")], input=json.dumps(payload), capture_output=True,
+        text=True, timeout=60,
+        env={"CLAUDE_PLUGIN_DATA": str(data_dir), "PATH": "/usr/bin:/bin", "GROK_HOOK_EVENT": "pre_tool_use"})
+    assert proc.returncode == 0, proc.stderr
+    assert (proc.stdout.strip() == "") is quiet

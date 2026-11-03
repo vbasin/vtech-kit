@@ -43,11 +43,27 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 # ── input / output ─────────────────────────────────────────────────────────────
 def read_input() -> Dict[str, Any]:
+    """The hook's stdin payload. Exits quietly instead when Grok is running this Claude plugin
+    hook in a repo that has the kit's Grok-native hooks (`stand_aside`)."""
     try:
         data = json.load(sys.stdin)
-        return data if isinstance(data, dict) else {}
+        data = data if isinstance(data, dict) else {}
     except Exception:  # noqa: BLE001 — malformed input must not break the session
-        return {}
+        data = {}
+    if stand_aside(data):
+        sys.exit(0)
+    return data
+
+
+def stand_aside(data: Dict[str, Any]) -> bool:
+    """Grok loads Claude plugins, hooks included, so in a repo where install_native.py also
+    wrote `.grok/hooks/kit.json` every kit hook would run twice. The native hooks are the
+    ones written for Grok, so the plugin's copy steps aside. Grok sets `GROK_HOOK_EVENT` on
+    every hook it runs (Grok 1.0.70 built-in docs); Claude Code does not."""
+    if not os.environ.get("GROK_HOOK_EVENT"):
+        return False
+    root = repo_root(data.get("cwd") if isinstance(data.get("cwd"), str) else None)
+    return root is not None and (root / ".grok" / "hooks" / "kit.json").is_file()
 
 
 def emit(obj: Dict[str, Any]) -> None:
