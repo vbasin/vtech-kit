@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -218,11 +219,17 @@ def component_paths(root: Path, entry: str) -> List[Path]:
 def describe(root: Path, entry: str) -> str:
     """The component's own one-line description from its frontmatter: what it is for."""
     for path in component_paths(root, entry):
-        found = FRONTMATTER_DESCRIPTION.search(_read(path / "SKILL.md" if path.is_dir() else path))
-        if found:
-            text = found.group(1).strip().strip("'\"|>").strip()
-            if text:
-                return text[:RAW_LIMIT]
+        source = _read(path / "SKILL.md" if path.is_dir() else path)
+        found = FRONTMATTER_DESCRIPTION.search(source)
+        if not found:
+            continue
+        text = found.group(1).strip()
+        if re.fullmatch(r"[|>][+-]?\d*", text):  # a YAML block scalar: its indented lines
+            text = " ".join(re.match(r"((?:\n[ \t]+.*|\n[ \t]*(?=\n))*)", source[found.end():])
+                            .group(1).split())
+        text = text.strip().strip("'\"").strip()
+        if text:
+            return text[:RAW_LIMIT]
     return ""
 
 
@@ -349,12 +356,30 @@ def main(backlog_file: Optional[Path] = None) -> int:
     session_id = str(data.get("session_id") or "")
     if not session_id or backlog is None:
         return 0
+    deadline = time.monotonic() + 45  # the hook's timeout is 60 s
     path = backlog_file or backlog.DEFAULT
     state = _roots_state(session_id, data.get("cwd"))
-    for root in learning_roots(data.get("cwd")):
-        capture(root, state["roots"][str(root)], path)
+    for ident in state.pop("awaiting", []):  # no later Stop will release them
+        backlog.release(path, ident)
+    roots = learning_roots(data.get("cwd"))
+    for root in roots:  # record everything first, then send in what time is left
+        capture(root, state["roots"][str(root)], path, send=False)
     save_state(learning_id(session_id), state)
+    send_all(roots, path, deadline)
     return 0
+
+
+def send_all(roots: List[Path], path: Path, deadline: float) -> List[Dict[str, Any]]:
+    """One deadline for every checkout's send, so the hook is never killed mid-way."""
+    results = []
+    for root in roots:
+        left = deadline - time.monotonic()
+        if left < 10:
+            break
+        result = send_repo(root, path, budget_s=min(40.0, left))
+        if result:
+            results.append(result)
+    return results
 
 
 NO_ACCESS = re.compile(r"not enabled for this session|Resource not accessible|HTTP 40[34]", re.IGNORECASE)
@@ -369,6 +394,7 @@ def stop_main(backlog_file: Optional[Path] = None) -> int:
     session_id = str(data.get("session_id") or "")
     if not session_id or backlog is None:
         return 0
+    deadline = time.monotonic() + 70  # the hook's timeout is 90 s
     path = backlog_file or backlog.DEFAULT
     scripts = PLUGIN / "portable" / "kit-deliver" / "scripts" / "backlog.py"
     state = _roots_state(session_id, data.get("cwd"))
@@ -417,12 +443,9 @@ def stop_main(backlog_file: Optional[Path] = None) -> int:
         emit({"decision": "block", "reason": "kit learning (one-time, for what this session added):\n"
               + "\n".join(asks) + "\nThen finish."})
         return 0
-    failed = ""
-    for root in roots:
-        result = send_repo(root, path, budget_s=40.0)
-        if result and NO_ACCESS.search(result.get("error") or ""):
-            failed = backlog.report_target(path)
     save_state(learning_id(session_id), state)
+    failed = next((backlog.report_target(path) for r in send_all(roots, path, deadline)
+                   if NO_ACCESS.search(r.get("error") or "")), "")
     if failed and os.environ.get("CLAUDE_CODE_REMOTE") == "true" and not state.get("access_asked"):
         state["access_asked"] = True
         save_state(learning_id(session_id), state)

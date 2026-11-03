@@ -1370,3 +1370,27 @@ def test_a_codex_agent_reports_its_toml_description(repo: Path) -> None:
     (repo / ".codex/agents").mkdir(parents=True)
     (repo / ".codex/agents/sql_checker.toml").write_text('name = "sql_checker"\ndescription = "Check SQL"\n')
     assert learning_report.describe(repo, "agent:sql_checker") == "Check SQL"
+
+
+@pytest.mark.parametrize("frontmatter", [
+    "description: >\n  Audit a site\n  for broken links\n",
+    "description: |-\n  Audit a site\n  for broken links\n",
+    "description: 'Audit a site for broken links'\n",
+])
+def test_a_yaml_block_description_is_read(repo: Path, frontmatter: str) -> None:
+    sys.path.insert(0, str(SCRIPTS))
+    import learning_report
+    (repo / ".claude/skills/audit").mkdir(parents=True)
+    (repo / ".claude/skills/audit/SKILL.md").write_text(f"---\nname: audit\n{frontmatter}---\n")
+    assert learning_report.describe(repo, "skill:audit") == "Audit a site for broken links"
+
+
+def test_session_end_releases_what_the_last_stop_held(repo: Path, data_dir: Path, tmp_path: Path) -> None:
+    """The session can end right after the ask: a hold nobody releases loses the report."""
+    opt_in(repo, tmp_path)
+    base = {"session_id": "end-1", "cwd": str(repo)}
+    learn(tmp_path, data_dir, base, "start")
+    add_skill(repo, "trace-repro", "x")
+    assert learn(tmp_path, data_dir, base, "stop")["decision"] == "block"
+    learn(tmp_path, data_dir, base)
+    assert '"title": "[kit-learning] skill: trace-repro"' in gh_log(tmp_path)
