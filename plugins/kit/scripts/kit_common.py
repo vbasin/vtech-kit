@@ -196,7 +196,7 @@ def resolve_python(config: Dict[str, Any], root: Path) -> Optional[str]:
 # ── per-session state ──────────────────────────────────────────────────────────
 def state_dir() -> Path:
     base = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.join(
-        os.path.expanduser("~"), ".cache", "claude-kit"
+        os.path.expanduser("~"), ".cache", "vtech-kit"
     )
     path = Path(base) / "state"
     path.mkdir(parents=True, exist_ok=True)
