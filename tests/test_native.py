@@ -254,3 +254,30 @@ def test_grok_first_bash_call_sets_the_baseline_when_start_did_not_run(tmp_path,
     call_hook(repo, "grok", "guard", data, tmp_path)  # a later call must not move the baseline
     call_hook(repo, "grok", "stop", data, tmp_path)
     assert _components(learning) == ["skill:notes"]
+
+
+def test_install_upgrades_its_own_unchanged_files_and_keeps_edited_ones(tmp_path, monkeypatch):
+    """A Grok install made before the learning hooks has the guard-only kit.json; reinstalling
+    must upgrade it, not refuse. A file the user edited is still refused."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    old = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command":
+           'python3 "$(git rev-parse --show-toplevel)/.grok/skills/kit-deliver/scripts/native_hook.py" grok guard',
+           "timeout": 15}]}]}}
+    (repo / ".grok/hooks").mkdir(parents=True)
+    (repo / ".grok/hooks/kit.json").write_text(json.dumps(old, indent=2) + "\n")
+    assert install_native.install(repo, "grok") == "installed"
+    hooks = json.loads((repo / ".grok/hooks/kit.json").read_text())["hooks"]
+    assert {"SessionStart", "PreToolUse", "Stop"} == set(hooks)
+    assert install_native.install(repo, "grok") == "unchanged"
+
+    # A later kit version changes the file: the manifest says the old one is ours.
+    monkeypatch.setattr(install_native, "desired", lambda host: {".grok/hooks/kit.json": "{}\n"})
+    assert install_native.install(repo, "grok") == "installed"
+    assert (repo / ".grok/hooks/kit.json").read_text() == "{}\n"
+
+    (repo / ".grok/hooks/kit.json").write_text('{"mine": true}\n')
+    monkeypatch.setattr(install_native, "desired", lambda host: {".grok/hooks/kit.json": "{\"v\": 3}\n"})
+    with pytest.raises(ValueError, match="reconcile"):
+        install_native.install(repo, "grok")
+    assert (repo / ".grok/hooks/kit.json").read_text() == '{"mine": true}\n'
