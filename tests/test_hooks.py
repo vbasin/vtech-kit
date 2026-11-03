@@ -1158,3 +1158,33 @@ def test_a_label_that_exists_is_fine_and_one_that_cannot_be_made_keeps_entries_q
         assert "issue create" not in gh_log(tmp_path)
     if "GH_LABEL_EXISTS" in env:
         assert "api repos/o/kit/labels -f" not in gh_log(tmp_path), "an existing label is not re-created"
+
+
+def _stand_aside(repo: Path, event: str, monkeypatch: pytest.MonkeyPatch) -> bool:
+    import kit_common
+    monkeypatch.setenv("GROK_HOOK_EVENT", event)
+    return kit_common.stand_aside({"cwd": str(repo)})
+
+
+def test_plugin_hooks_stand_aside_only_for_what_the_native_grok_hooks_cover(
+        repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Grok loads Claude plugins, hooks included. Where install_native.py wrote Grok's own
+    hooks, the plugin's copy of an event they handle must not run a second time; an event
+    they do not handle, or one an older native copy handles less well, still runs."""
+    sys.path.insert(0, str(SCRIPTS))
+    import install_native
+    assert not _stand_aside(repo, "stop", monkeypatch), "no native install: the plugin is all there is"
+    install_native.install(repo, "grok")
+    assert _stand_aside(repo, "pre_tool_use", monkeypatch)
+    assert _stand_aside(repo, "session_start", monkeypatch)
+    assert _stand_aside(repo, "stop", monkeypatch)
+    assert not _stand_aside(repo, "post_tool_use", monkeypatch), "no native PostToolUse: lint must still run"
+    assert not _stand_aside(repo, "session_end", monkeypatch)
+    native = repo / ".grok/skills/kit-deliver/scripts/native_hook.py"
+    native.write_text(native.read_text().replace("GROK_STOP_VERIFIES = True", ""))
+    assert _stand_aside(repo, "pre_tool_use", monkeypatch)
+    assert not _stand_aside(repo, "stop", monkeypatch), "an older native Stop only learned: keep the plugin's"
+    assert not _stand_aside(repo, "session_start", monkeypatch), "the plugin's Stop needs its baseline"
+    monkeypatch.delenv("GROK_HOOK_EVENT")
+    import kit_common
+    assert not kit_common.stand_aside({"cwd": str(repo)}), "Claude Code never stands aside"

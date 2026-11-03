@@ -379,7 +379,7 @@ def verify(root: Path, cfg: Dict[str, Any], changed: List[str],
     return failures, tests, gaps
 
 
-def _digest(root: Path, files: List[str]) -> str:
+def verdict_digest(root: Path, files: List[str]) -> str:
     """The state a verdict was reached on: the changed files and the config that judged them."""
     h = hashlib.sha256()
     for rel in [*files, CONFIG_RELPATH.as_posix(), ".kit/kit.json"]:
@@ -412,7 +412,7 @@ def hook_main() -> int:
     changed = changed_since(root, state.get("baseline", {}), state.get("edited", []))
     if not changed:
         return 0
-    digest = _digest(root, changed)
+    digest = verdict_digest(root, changed)
     # The hook fires at the end of every turn. A diff already judged clean, or whose gaps
     # were already reported, gets the same verdict again, so do not pay for it twice.
     if digest in (state.get("passed_digest"), state.get("gaps_digest")):

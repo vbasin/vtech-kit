@@ -43,11 +43,43 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 # ── input / output ─────────────────────────────────────────────────────────────
 def read_input() -> Dict[str, Any]:
+    """The hook's stdin payload. Exits quietly instead when Grok is running this Claude plugin
+    hook in a repo that has the kit's Grok-native hooks (`stand_aside`)."""
     try:
         data = json.load(sys.stdin)
-        return data if isinstance(data, dict) else {}
+        data = data if isinstance(data, dict) else {}
     except Exception:  # noqa: BLE001 — malformed input must not break the session
-        return {}
+        data = {}
+    if stand_aside(data):
+        sys.exit(0)
+    return data
+
+
+def stand_aside(data: Dict[str, Any]) -> bool:
+    """Grok loads Claude plugins, hooks included, so in a repo where install_native.py also
+    wrote `.grok/hooks/kit.json` a kit hook can run twice. For each event the native install
+    handles, the plugin's copy steps aside; events it does not handle (PostToolUse lint,
+    SessionEnd) keep running. Start and Stop step aside only when the installed native hook
+    verifies at Stop (`GROK_STOP_VERIFIES`), since an older copy only recorded learning there.
+    Grok sets `GROK_HOOK_EVENT` on every hook it runs (Grok 1.0.70 built-in docs); Claude
+    Code does not."""
+    event = os.environ.get("GROK_HOOK_EVENT", "")
+    needs = {"pre_tool_use": "guard", "session_start": "stop", "stop": "stop"}.get(event)
+    if not needs:
+        return False
+    root = repo_root(data.get("cwd") if isinstance(data.get("cwd"), str) else None)
+    if root is None:
+        return False
+    try:
+        hooks = json.loads((root / ".grok" / "hooks" / "kit.json").read_text(encoding="utf-8"))
+        native = (root / ".grok" / "skills" / "kit-deliver" / "scripts" / "native_hook.py").read_text(encoding="utf-8")
+        commands = [h.get("command", "") for groups in hooks["hooks"].values() for group in groups
+                    for h in group.get("hooks", [])]
+    except (OSError, ValueError, KeyError, AttributeError, TypeError):
+        return False
+    if not any(isinstance(c, str) and c.endswith(f" grok {needs}") for c in commands):
+        return False
+    return needs == "guard" or "GROK_STOP_VERIFIES = True" in native
 
 
 def emit(obj: Dict[str, Any]) -> None:

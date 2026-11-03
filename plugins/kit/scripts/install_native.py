@@ -27,7 +27,8 @@ START = "<!-- vtech-kit workflow: start -->"
 END = "<!-- vtech-kit workflow: end -->"
 MANIFEST = {"codex": ".codex/.kit-native.json", "grok": ".grok/.kit-native.json"}
 # Hashes of every earlier version this installer generated, for installs with no manifest.
-LEGACY = {".grok/hooks/kit.json": {"be9f14a65863fc7ce60216f8c40f46c55864966d4baebff53534de557fbf2a68"}}
+LEGACY = {".grok/hooks/kit.json": {"be9f14a65863fc7ce60216f8c40f46c55864966d4baebff53534de557fbf2a68",
+                                    "f04b2e21bc5c6053c113ef564364c1e288b0f10d8776b7666e5f91befd10820b"}}
 WORKFLOW = (START + "\n"
             "For substantive requests, use the installed kit-deliver skill when available. "
             "Complete the user's task first, use suitable existing tools, and obtain a missing "
@@ -70,7 +71,7 @@ def desired(host: str) -> Dict[str, str]:
             "SessionStart": [{"hooks": [{"type": "command", "command": script + " grok start", "timeout": 30}]}],
             "PreToolUse": [{"matcher": "Bash", "hooks": [
                 {"type": "command", "command": script + " grok guard", "timeout": 15}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": script + " grok stop", "timeout": 30}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": script + " grok stop", "timeout": 480}]}],
         }}
         return {".grok/hooks/kit.json": json.dumps(hooks, indent=2) + "\n"}
     raise ValueError("host must be codex or grok")
