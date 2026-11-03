@@ -82,3 +82,13 @@ for ideas (`improve` already merges near-duplicates; the reversal condition belo
 The kit review's claim that `vbasin/vtech-kit` does not exist was wrong: the repository was
 renamed, and `vbasin/claude-kit` redirects to it.
 
+## What the repos learned before the hook
+
+SessionEnd compares with SessionStart's inventory, so anything already in a repo when the
+hook first runs is never reported, and ideas recorded before entries carried a repo are
+never sent. `learning_report.py backfill` closes that once per repo: it records the current
+inventory (minus what is already recorded for the repo), optionally claims the older ideas,
+and sends under the same two opt-ins. Idempotent. Rejected: walking git history for every
+component ever added (it would report what was since removed, and the current inventory is
+what the repo actually relies on). On ML_analytics it records four skills and five dev tools.
+

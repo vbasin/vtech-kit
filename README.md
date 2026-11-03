@@ -202,7 +202,13 @@ Turning sending on, once per machine (the VM, your laptop), in a terminal:
    from this machine.
 
 A repo adopted before this change needs `"learning": {"share": true}` added to its
-`.claude/kit.json`. If this repo is public, the issues are public too: they show repo
+`.claude/kit.json`. SessionEnd reports only what a session adds, so what a repo built
+before this hook existed is sent once by hand. From inside that repo's folder, paste and
+press Enter:
+`python3 "$(find ~/.claude/plugins -path '*kit/scripts/learning_report.py' | head -1)" backfill --claim-ideas`
+It prints what it recorded and sent. Running it again sends nothing new. `--claim-ideas`
+also tags this machine's older ideas, recorded before entries carried a repo name, with
+this repo; leave it off in all but the repo where those ideas came from. If this repo is public, the issues are public too: they show repo
 names, component names and idea text.
 
 ## Learning reusable skills

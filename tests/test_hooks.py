@@ -1086,3 +1086,33 @@ def test_a_sync_rereads_the_log_once_it_holds_the_lock(tmp_path: Path, monkeypat
 
     result = backlog.sync(learning, "o/kit", "acme/pipeline", run=run)
     assert calls == [] and result["sent"] == [] and result["queued"] == 0
+
+
+def test_backfill_records_what_the_repo_already_had(repo: Path, tmp_path: Path) -> None:
+    # Built by sessions before the hook existed: SessionEnd never sees it, backfill does.
+    opt_in(repo, tmp_path)
+    (repo / ".claude/skills/trace-repro").mkdir(parents=True)
+    (repo / ".claude/skills/trace-repro/SKILL.md").write_text("x")
+    commit(repo, "old skill")
+    learning = tmp_path / "learning.jsonl"
+    backlog = backlog_module()
+    backlog.append(learning, {"kind": "idea", "id": "old", "task": "t", "idea": "an old idea",
+                              "evidence": "e", "status": "proposed", "created_at": "2026-10-01"})
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(FAKE_GH)
+    (bin_dir / "gh").chmod(0o755)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "KIT_LEARNING_FILE": str(learning), "GH_LOG": str(tmp_path / "gh.log")}
+
+    def backfill(*flags: str) -> dict:
+        proc = subprocess.run([sys.executable, str(SCRIPTS / "learning_report.py"), "backfill", *flags],
+                              cwd=repo, capture_output=True, text=True, timeout=120, env=env)
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout)
+
+    out = backfill("--claim-ideas")
+    assert out["recorded"] == ["skill:trace-repro"] and out["claimed_ideas"] == 1
+    log = gh_log(tmp_path)
+    assert "skill: trace-repro" in log and "an old idea" in log
+    again = backfill("--claim-ideas")
+    assert again["recorded"] == [] and again["claimed_ideas"] == 0, "backfill is not idempotent"

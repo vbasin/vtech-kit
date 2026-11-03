@@ -206,7 +206,45 @@ def main(backlog_file: Optional[Path] = None) -> int:
     return 0
 
 
+def backfill(root: Path, path: Path, claim_ideas: bool = False) -> Dict[str, Any]:
+    """Once per repo: record what the repo already has, which SessionEnd never reports
+    because it was there when the session started. Built by sessions before this hook
+    existed, it is still what the repo learned. Ideas recorded before entries carried a
+    repo are claimed for this repo only when asked, since nothing says where they came from.
+    Then send, under the same two opt-ins as the hook."""
+    repo = backlog.repo_slug(root)
+    records = list(backlog.read_records(path).values())
+    known = {f"{r.get('type')}:{r.get('name')}" for r in records
+             if r.get("kind") == "component" and r.get("repo") == repo}
+    added = [e for e in inventory(root) if e not in known]
+    for entry in added:
+        kind, name = entry.split(":", 1)
+        backlog.add_component(path, kind, name, repo)
+    claimed = []
+    if claim_ideas and repo:
+        taken = {r.get("claimed_from") for r in records}
+        for record in records:
+            if record.get("kind") == "idea" and not record.get("repo") and record["id"] not in taken:
+                backlog.append(path, {**record, "id": backlog.uuid.uuid4().hex, "repo": repo,
+                                      "claimed_from": record["id"]})
+                claimed.append(record["id"])
+    learning = load_config(root).get("learning")
+    target = backlog.report_target(path)
+    sent: Dict[str, Any] = {}
+    if isinstance(learning, dict) and learning.get("share") is True and repo and target \
+            and repo.lower() != target.lower():
+        sent = backlog.sync(path, target, repo)
+    return {"repo": repo, "recorded": added, "claimed_ideas": len(claimed), "sync": sent or
+            "not sent: needs `backlog.py target OWNER/NAME` and learning.share in .claude/kit.json"}
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["backfill"]:  # run by hand, not as a hook: report what it did
+        found = repo_root(str(Path.cwd()))
+        if found is None or backlog is None:
+            sys.exit("backfill: run it inside a git checkout of the repo")
+        print(json.dumps(backfill(found, backlog.DEFAULT, "--claim-ideas" in sys.argv), indent=2))
+        sys.exit(0)
     try:
         sys.exit(main())
     except Exception:  # noqa: BLE001 — a hook must never break the session
