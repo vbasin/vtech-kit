@@ -8,3 +8,4 @@ This repo is a Claude Code plugin marketplace (`vtech-kit`) consumed by other re
 - Plugins carry no `version`, so every commit to `main` ships to every repo on its next `/plugin marketplace update`. Treat `main` as released.
 - Keep model-invocable skill descriptions short, because each one costs context in every session of every repo. Use `disable-model-invocation: true` for skills only a user should start.
 - Plugin agents can't use `hooks`, `mcpServers` or `permissionMode` frontmatter (ignored for plugins). Use `tools`/`disallowedTools`.
+- When you accept a review finding on this repo's PRs (Copilot, `kit:reviewer`, `/code-review`), record it in `.claude/defects.jsonl` with `python3 plugins/kit/portable/kit-deliver/scripts/defects.py add ...` in the same commit as the fix (`--id gh-<comment id>` for a PR review comment). `defects.py harvest` catches the ones that were missed.

@@ -185,5 +185,6 @@ def test_the_suite_covers_what_the_kit_claims() -> None:
         "a reusable candidate is scored against a baseline before it is shared": "reusable-capability",
         "learning reported by other repos becomes a scored PR, most-reported first": "learning-becomes-a-pr",
         "what already ships is searched and is the baseline a new component must beat": "existing-tool-is-the-baseline",
+        "a defect that recurs after its lesson moves upstream, toward a check": "repeated-defect-moves-upstream",
     }.items():
         assert case in names, f"no case covers: {claim}"

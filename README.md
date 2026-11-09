@@ -109,6 +109,7 @@ claude plugin eval ./plugins/kit --ablation with-without
 | `task-first` | The kit's improvement loop never runs ahead of the user's task (a guard: Δ near zero is the pass) |
 | `capability-required` | A missing prerequisite is obtained during the task, not deferred (a guard: Δ near zero is the pass) |
 | `reusable-capability` | A repeated gap leads to a tested reusable candidate |
+| `repeated-defect-moves-upstream` | A review finding that keeps coming back is turned into a check, not another reviewer line |
 | `existing-tool-is-the-baseline` | What already ships is searched first, and is the baseline a new component must beat |
 | `learning-becomes-a-pr` | Learning reported by other repos becomes a scored PR, most-reported first, merged only by you |
 | `design-not-handed-back` | The design is Claude's to settle, by comparing rivals against stated criteria |
