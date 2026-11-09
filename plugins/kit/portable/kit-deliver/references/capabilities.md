@@ -3,7 +3,10 @@
 The one statement of this rule. `kit-deliver`, Claude's `deliver`, `deliberate` and
 `improve` all point here instead of restating it.
 
-1. **Needed to finish this task, and nothing available fits** → research, adapt or build
+1. **Needed to finish this task, and nothing available fits** → first search what exists
+   beyond this session: the host's own built-in commands and skills, then published
+   plugins and skills from the host's official marketplace. A published one is
+   recommended to the user, not installed by you. Then research, adapt or build
    the smallest capability that does, now, and use it to finish. Do not hand the task back
    because a skill is missing, and do not install or run untrusted downloaded code.
 2. **Something available is adequate** → use it, and finish and verify the task first.
@@ -28,5 +31,7 @@ The one statement of this rule. `kit-deliver`, Claude's `deliver`, `deliberate` 
    - executable helpers: `scripts/learning.py evaluate` with a trusted suite that has an
      improvement case and a preserved baseline case (see `learning.md`).
 
-   Without that evidence or that authority, leave the candidate where it is and report
-   it: what it does, its cost, and the case against it.
+   When rule 1 found an existing component that does part of the job, the report also
+   names it and shows the candidate beats it on the same cases. Without that evidence or
+   that authority, leave the candidate where it is and report it: what it does, its cost,
+   and the case against it.

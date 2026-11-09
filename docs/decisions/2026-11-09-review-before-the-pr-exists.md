@@ -69,6 +69,23 @@ Rejected: it enforces nothing, it would duplicate the learning pipeline, and it 
 - `kit:reviewer`, third round on those fixes: three regressions the fixes introduced (`sudo -u` and `xargs -I` lost the program, `--tags` beside a branch skipped the push, a `$(...)` refspec was read as branch names), all fixed with tests. Two low-severity races are documented as limits. This is the deliver 6.6 amendment in action: each fix round introduced defects of its own.
 - Live, in Claude Code 2.1.319 with `--plugin-dir`: an unreviewed `gh pr create` was denied. A real `kit:reviewer` run stamped the tree, including with an untracked file present, and the same command then went through.
 
+## Follow-up: the reviewer Claude Code already ships (2026-11-09)
+
+V asked whether something already built would beat what the kit built. Claude Code ships `/code-review`, which none of this work had compared against. The same blind replay was run with `/code-review high`, one run per diff, at $0.15 to $0.48 per review:
+
+| PR diff | Copilot findings | current `reviewer` | rewritten `reviewer` | built-in `/code-review high` | rewritten + built-in |
+|---|---|---|---|---|---|
+| #30 | 8 | 2 | 4 | 3 | 4 |
+| #16 | 8 | 3 | 4 | 6 | 7 |
+| #15 | 4 | 1 | 1 | 3 | 3 |
+| #9 | 3 | 0 | 2 | 1 | 2 |
+| #28 | 3 | 3 | 1 | 1 | 2 |
+| total | 26 | 9 | 12 | 14 | 18 |
+
+None of these diffs was used to write `/code-review`, so its 14 of 26 involves no leakage. That is not a ranking: each figure is one run, the lead over the rewritten reviewer comes from #16 alone, and on the held-out pair the built-in is weakest (2 of 6, against 3 of 6 for each kit reviewer). What holds across the diffs is that the two catch different defects, so together they reach 18 of 26. That total still carries the rewritten reviewer's leakage on #30, #16 and #15. This is the "two independent reviewers" remedy that the first reversal condition below names, taken now rather than after five more PRs. `deliver` step 6.4 runs both. The gate still stamps on `kit:reviewer`, because that is the run the hook can see.
+
+The miss behind this: `deliberate` step 2 looked only at what was installed (`claude plugin list`), never at what ships with Claude Code or what is published, and nothing made the best existing tool the baseline that a new component must beat. Step 2 now searches all three, and an "adopt it as it is" candidate takes part in step 4. The new eval case `existing-tool-is-the-baseline` scores that claim. Its first runs scored 0.00 in both arms. The rubric has been tightened since, and the result for the committed rubric is in `plugins/kit/evals/README.md`.
+
 ## Unresolved
 
 - One run per arm. Whether the rewritten passes beat the current reviewer on unseen diffs is not established (held-out tie). They are kept because they cost one Sonnet run's reading and found real defects Copilot raised only in later rounds. The decision on them is reopened by the condition below.
@@ -76,6 +93,6 @@ Rejected: it enforces nothing, it would duplicate the learning pipeline, and it 
 
 ## What would change this decision
 
-- Copilot findings per Claude-authored PR on this repo do not fall below the 4.1 average (57 / 14) over the next five PRs made with the gate on. Then the stamp certifies too little: run two independent reviewers in parallel before the PR (the union result above), or replace the reviewer.
+- Copilot findings per Claude-authored PR on this repo do not fall below the 4.1 average (57 / 14) over the next five PRs made with the gate on. Two reviewers already run (follow-up above), so the stamp would then certify too little: rework `kit:reviewer` from the misses, or gate on the built-in `/code-review` instead.
 - A Claude Code release drops `agent_type` from SubagentStart/SubagentStop, or stops firing them for background agents. The stamp then never lands, and `once` degrades to a nudge. Move the stamp to a script the reviewer runs.
 - The gate's denials become noise: more than one in five is followed by a retry with no reviewer run in between. Then default `review.gate` to `off` outside this repo.

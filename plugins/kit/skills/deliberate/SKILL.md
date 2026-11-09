@@ -32,13 +32,20 @@ Find out whether this is solved before designing it. In order, stopping when one
    skipped.
 2. Code in this repo that already does it or nearly does. Search; do not assume.
 3. A skill already enabled in this session.
-4. A skill available but not enabled, or a published plugin. `claude plugin list` and
-   `claude plugin details <name>` are free and current; prefer them to recall, which is
-   how the same lookup gets done twice with different answers.
+4. A capability that ships with Claude Code itself (its built-in commands and skills,
+   such as `/code-review`, `/security-review` and `/simplify`, are in the session's skill
+   list), an installed plugin (`claude plugin list`, `claude plugin details <name>`), or
+   a published one that is not installed: the plugin-search tool where the session has
+   one, else the `.claude-plugin/marketplace.json` of Anthropic's marketplace
+   `anthropics/claude-plugins-official`. Prefer these readouts to recall, which is how the
+   same lookup gets done twice with different answers. A published plugin is recommended
+   to the user with what it would replace; it is not installed by you.
 5. An existing skill or module worth customising instead of rewriting. A plugin's own
    skill cannot be edited in place, so customising one means a new skill under its own
    name whose description says when to use it instead.
-6. Only then, something new.
+6. Only then, something new. An option from 2 to 5 that fits only in part is carried
+   forward: it is one of the candidates and the baseline the new one is measured
+   against, on the same cases.
 
 If the answer turns on something that moves — a model, a tool, an API, a library version
 — look it up rather than recalling it. Training data goes stale, and a search is cheap
@@ -67,6 +74,12 @@ you would have to undo to change your mind.
 
 Write each as the shape in two sentences, what it costs, what it makes easy, what it
 makes hard, and what it forecloses.
+
+When step 2 found an existing tool that does part of the job, "adopt it as it is" is one
+of the candidates, not a control kept beside the winner. A candidate that builds something
+new wins only with a stated rule: what it must beat the existing tool on, measured on the
+same cases, and that it is dropped if it does not. Run both only when the measurement
+shows they catch different things.
 
 If the candidates all turn out to be variations of the first, the field is too narrow.
 Generate the next two with subagents that each get the problem and the criteria but not

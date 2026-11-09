@@ -74,7 +74,10 @@ Never change the session's model or effort yourself. If the task needs a differe
 3. Run `/simplify` when the change touched code that already existed, or added more than a
    few files. Do it before the reviewers, so they judge the code that will actually ship
    rather than a draft of it.
-4. Run `kit:reviewer` on any non-trivial diff, plus every `routing.reviewers` agent whose globs match the changed files. Run them in parallel, in one message.
+4. Run `kit:reviewer` on any non-trivial diff, plus every `routing.reviewers` agent whose
+   globs match the changed files. Also run Claude Code's built-in `/code-review high` when
+   the session has it: it catches different defects from `kit:reviewer`. Start them all in
+   parallel, in one message.
 5. Act on findings that affect correctness, safety, testability or duplication. Say which ones you skipped and why — acting on every nitpick is its own failure.
 6. **Any edit you made in steps 3 to 5 puts the diff back where it started.** Before you
    report, re-run the gates whose globs match what changed and `/kit:verify`, and run

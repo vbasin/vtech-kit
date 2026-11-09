@@ -32,6 +32,9 @@ and tokens, which is why their `max_turns` and `timeout_seconds` are higher than
 rest. `prior-decision-is-reused` grants it for the same reason as the first three, inverted: if
 a run ignores the record and re-derives the choice, delegating to the critic is part of
 what that costs, and the trace grader should be able to see it happen.
+`existing-tool-is-the-baseline` grants it because it is a `deliberate` case too. It has no
+`Bash` or network, so the plugin search cannot actually run: the case scores the plan's
+decision rule, not the search.
 `reversed-decision-reopens` grants it because there the deliberation is the *correct*
 behaviour — the condition fired, the choice is open — so withholding the critic would
 measure a reopening the kit never intended.
@@ -56,6 +59,7 @@ read its Δ.
 | `task-first` | The kit's improvement loop never runs ahead of the user's task | **Near zero is the pass**, like `obvious-fix-stays-cheap`: a bare model already delivers first (measured 1.00 / 1.00 on 2026-10-30). Negative means `improve` is pulling sessions off the task |
 | `capability-required` | A missing prerequisite is obtained during the task, not deferred to the improvement loop | **Near zero is the pass**: the risk is the kit teaching deferral, not the bare model lacking the instinct |
 | `reusable-capability` | A repeated gap leads to a candidate scored against a baseline, with evidence that can see an instructions-only skill | Positive: measured +1.00 on one run per arm (2026-10-30), with `improve` never invoked, so the skill descriptions alone carried it |
+| `existing-tool-is-the-baseline` | Asked for a new review agent, Claude first searches what already ships (built-ins, installed and published plugins) and measures the new agent against the best of them | Positive: `deliberate` step 2 reaches past this session. Written after the kit built `kit:reviewer` without ever comparing it to Claude Code's own `/code-review`. **Not landing yet:** 0.00 in both arms, two runs each on the committed rubric (2026-11-09), after three earlier runs per arm on looser drafts that also scored 0.00. With the kit, sessions name `/code-review` as a baseline but still build alongside it rather than only if the new agent beats it |
 | `learning-becomes-a-pr` | In the kit repo, the `kit-learning` issue reported by the most repos becomes a scored candidate and a PR the user merges | Positive: `improve` ranks by recurrence and keeps promotion behind a PR |
 | `design-not-handed-back` | The design is Claude's to settle, and it settles it by comparing rivals against stated criteria | Positive: the deliberation loop is doing work a bare session doesn't |
 | `obvious-fix-stays-cheap` | The kit doesn't charge design ceremony for a one-line fix | **Near zero is the pass.** Strongly negative means the kit is making trivial work expensive |
