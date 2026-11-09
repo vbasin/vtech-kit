@@ -247,8 +247,21 @@ def test_a_ledger_that_is_a_symlink_is_refused(repo: Path, tmp_path: Path) -> No
     ledger_path(repo).parent.mkdir()
     ledger_path(repo).symlink_to(target)
     out = run(repo, "add", "--category", "cost", "--summary", "s", "--rule", "r")
-    assert out.returncode == 1 and "not a regular file" in out.stderr
+    assert out.returncode == 1 and "symlink" in out.stderr
     assert target.read_text() == "keep\n"
+    explicit = run(repo, "--file", str(ledger_path(repo)), "add", "--category", "cost",
+                   "--summary", "s", "--rule", "r")
+    assert explicit.returncode == 1 and "not a regular file" in explicit.stderr
+    assert target.read_text() == "keep\n"
+
+
+def test_a_claude_dir_that_is_a_symlink_is_refused(repo: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / ".claude").symlink_to(outside)
+    out = run(repo, "add", "--category", "cost", "--summary", "s", "--rule", "r")
+    assert out.returncode == 1 and "symlink" in out.stderr
+    assert not list(outside.iterdir()), "nothing is written outside the repo"
 
 
 def test_cause_and_where_are_scrubbed(repo: Path) -> None:

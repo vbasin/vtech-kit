@@ -518,6 +518,17 @@ def _root() -> Path:
         return Path.cwd()
 
 
+def _default_ledger(root: Path) -> Path:
+    """`.claude/defects.jsonl` under the repo root, refused when any part of it below the
+    root is a symlink: a PR could commit `.claude` as a link that leads out of the repo."""
+    where = root
+    for part in LEDGER.parts:
+        where = where / part
+        if where.is_symlink():
+            raise Failed(f"{where} is a symlink; the ledger must live inside the repo")
+    return where
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="defects.py", description=__doc__.split("\n")[0])
     parser.add_argument("--file", type=Path, help="ledger path (default: .claude/defects.jsonl at the repo root)")
@@ -574,7 +585,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 def _run(args: argparse.Namespace) -> int:
     root = _root()
-    path = args.file or root / LEDGER
+    path = args.file or _default_ledger(root)
     found, lessons, merged = read(path)
     if args.cmd == "add":
         event = finding(args.category, args.summary, args.rule, args.cause, args.source,
