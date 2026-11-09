@@ -55,6 +55,19 @@ Rejected: it enforces nothing, it would duplicate the learning pipeline, and it 
 - It narrowed push gating from every `git push` to branches with a PR, and added `once` so the gate cannot deadlock.
 - It required held-out replay diffs and stated that Codex and Grok get no gate.
 
+## Review round on this change (before its PR)
+
+- `kit:security-reviewer`: one finding, that a reviewer stopped by an error or a usage limit still stamped the tree. Fixed: the stamp needs `Review complete:` as the reviewer's last line.
+- `kit:reviewer`: seven findings, all acted on.
+  - A stamp of the working tree never matched the commit when an untracked file existed. HEAD's tree is now stamped too.
+  - Shell forms went unseen: `bash -c`, subshells, `if`/`then`, `sudo`, wrapper flag values, a leading `cd`, push refspecs, `-Hfeat`. A command that will not lex falls back to the raw text.
+  - The gate judged the wrong branch or repo.
+  - The verdict was matched mid-message.
+  - Concurrent writes to the state file had no lock.
+  - The remaining three are documented as limits in the script.
+- `kit:reviewer`, second round on the fixed script: eight findings, all acted on. Comments ended the line that followed them; `sudo -n`, `bash -lc`, `eval` and `x=$(git push)` went unseen; a fork's PR to its upstream and `gh -R` were judged by the wrong repo; `--delete`, `--tags` and `HEAD:feat` pushes were judged by the wrong tree or name; and a stale lock could be broken by two waiters at once.
+- Live, in Claude Code 2.1.319 with `--plugin-dir`: an unreviewed `gh pr create` was denied. A real `kit:reviewer` run stamped the tree, including with an untracked file present, and the same command then went through.
+
 ## Unresolved
 
 - One run per arm. Whether the rewritten passes beat the current reviewer on unseen diffs is not established (held-out tie). They are kept because they cost one Sonnet run's reading and found real defects Copilot raised only in later rounds. The decision on them is reopened by the condition below.

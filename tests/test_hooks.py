@@ -1523,30 +1523,42 @@ def test_gh_pr_create_is_gated_like_the_mcp_tool(repo: Path, data_dir: Path) -> 
 
 
 @pytest.mark.parametrize("command,expected", [
-    ("gh pr create --fill", [("pr", None, None)]),
-    ("gh -R o/r pr create -H feat", [("pr", None, "feat")]),
+    ("gh pr create --fill", [("pr", None, None, None, None)]),
+    ("gh -R o/r pr create -H feat", [("pr", None, "feat", "feat", "o/r")]),
     ("gh pr view 3", []),
-    ("git -C sub push origin x", [("push", "sub", "x")]),
-    ("timeout 60 git -c a=b push", [("push", None, None)]),
+    ("git -C sub push origin x", [("push", "sub", "x", "x", None)]),
+    ("timeout 60 git -c a=b push", [("push", None, None, None, None)]),
     ("git log --grep push", []),
     ("echo 'git push'", []),
-    ("git status\ngit push", [("push", None, None)]),
-    ("gh pr create -Hfeat", [("pr", None, "feat")]),
-    ("gh pr create --head me:feat", [("pr", None, "feat")]),
-    ("bash -c 'gh pr create --fill'", [("pr", None, None)]),
-    ("(git push)", [("push", None, None)]),
-    ("{ git push; }", [("push", None, None)]),
-    ("if true; then git push; fi", [("push", None, None)]),
-    ("! git push", [("push", None, None)]),
-    ("sudo git push", [("push", None, None)]),
-    ("env -u X git push", [("push", None, None)]),
-    ("timeout -s KILL 60 git push", [("push", None, None)]),
-    ("git push origin feature", [("push", None, "feature")]),
-    ("git push -u origin +HEAD:refs/heads/x", [("push", None, None)]),
-    ("git push origin a b:c", [("push", None, "a"), ("push", None, "b")]),
-    ("cd sub && git push", [("push", "sub", None)]),
-    ("cd /abs && git -C inner push", [("push", "/abs/inner", None)]),
-    ("echo \"it's && git push", [("push", None, None)]),
+    ("git status\ngit push", [("push", None, None, None, None)]),
+    ("gh pr create -Hfeat", [("pr", None, "feat", "feat", None)]),
+    ("gh pr create --head me:feat", [("pr", None, "feat", "feat", None)]),
+    ("bash -c 'gh pr create --fill'", [("pr", None, None, None, None)]),
+    ("(git push)", [("push", None, None, None, None)]),
+    ("{ git push; }", [("push", None, None, None, None)]),
+    ("if true; then git push; fi", [("push", None, None, None, None)]),
+    ("! git push", [("push", None, None, None, None)]),
+    ("sudo git push", [("push", None, None, None, None)]),
+    ("env -u X git push", [("push", None, None, None, None)]),
+    ("timeout -s KILL 60 git push", [("push", None, None, None, None)]),
+    ("git push origin feature", [("push", None, "feature", "feature", None)]),
+    ("git push -u origin +HEAD:refs/heads/x", [("push", None, None, "x", None)]),
+    ("git push origin a b:c", [("push", None, "a", "a", None), ("push", None, "b", "c", None)]),
+    ("cd sub && git push", [("push", "sub", None, None, None)]),
+    ("cd /abs && git -C inner push", [("push", "/abs/inner", None, None, None)]),
+    ("echo \"it's && git push", [("push", None, None, None, None)]),
+    ("git add . # note\ngit push", [("push", None, None, None, None)]),
+    ("echo '# not a comment' && git push", [("push", None, None, None, None)]),
+    ("sudo -n git push", [("push", None, None, None, None)]),
+    ("nice -n 5 git push", [("push", None, None, None, None)]),
+    ("bash -lc 'git push'", [("push", None, None, None, None)]),
+    ("eval 'git push'", [("push", None, None, None, None)]),
+    ("x=$(git push)", [("push", None, None, None, None)]),
+    ('echo "$(gh pr create --fill)"', [("pr", None, None, None, None)]),
+    ("git push origin :feat", []),
+    ("git push --tags", []),
+    ("git push origin --delete feat", []),
+    ("git push origin HEAD:feat", [("push", None, None, "feat", None)]),
 ])
 def test_bash_actions_finds_pr_creation_and_pushes(command: str, expected: list) -> None:
     assert bash_actions(command) == expected
@@ -1617,3 +1629,73 @@ def test_a_stale_lock_does_not_stop_the_stamp(repo: Path, data_dir: Path) -> Non
     _review(repo, data_dir)
     assert _open_pr(repo, data_dir) == {}
     assert not lock.exists()
+
+
+def test_a_pr_from_a_fork_to_its_upstream_is_judged_by_the_fork(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    sh(repo, "git", "remote", "add", "origin", "https://github.com/me/r.git")
+    sh(repo, "git", "remote", "add", "upstream", "git@github.com:o/r.git")
+    _work(repo)
+    assert _denied(_open_pr(repo, data_dir)), "owner/repo names the upstream, not origin"
+
+
+def test_two_checkouts_of_other_repos_leave_the_pr_unjudged(tmp_path: Path, repo: Path,
+                                                             data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    sh(repo, "git", "remote", "add", "origin", "https://github.com/o/r.git")
+    _work(repo)
+    twin = tmp_path / "twin"
+    sh(tmp_path, "git", "clone", "-q", str(repo), str(twin))
+    sh(twin, "git", "remote", "set-url", "origin", "https://github.com/o/r.git")
+    out = hook("review_gate.py", {"hook_event_name": "PreToolUse", "cwd": str(tmp_path),
+                                  "tool_name": "mcp__github__create_pull_request",
+                                  "tool_input": {"owner": "o", "repo": "r"}}, data_dir)
+    assert out == {}, "two checkouts of o/r: which one opens the PR is unknown, so fail open"
+
+
+def test_gh_pr_create_for_another_repo_is_not_judged_here(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    sh(repo, "git", "remote", "add", "origin", "https://github.com/o/r.git")
+    _work(repo)
+    other = {"tool_name": "Bash", "tool_input": {"command": "gh pr create -R x/y --fill"}}
+    assert _gate(repo, data_dir, "PreToolUse", **other) == {}
+    same = {"tool_name": "Bash", "tool_input": {"command": "gh pr create -R github.com/O/R --fill"}}
+    assert _denied(_gate(repo, data_dir, "PreToolUse", **same))
+
+
+def test_a_push_under_another_name_is_gated_by_the_pr_branch_name(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    sh(repo, "git", "checkout", "-qb", "local")
+    _work(repo)
+    sh(repo, "git", "update-ref", "refs/remotes/origin/feat", "HEAD")  # as `push HEAD:feat` leaves it
+    _review(repo, data_dir)
+    assert _open_pr(repo, data_dir, head="feat") == {}  # PR head is feat, pushed from local
+    (repo / "src" / "pkg" / "other.py").write_text("def other():\n    return 7\n")
+    commit(repo, "unreviewed fix")
+    push = {"tool_name": "Bash", "tool_input": {"command": "git push origin HEAD:feat"}}
+    assert _denied(_gate(repo, data_dir, "PreToolUse", **push))
+    delete = {"tool_name": "Bash", "tool_input": {"command": "git push origin --delete feat"}}
+    assert _gate(repo, data_dir, "PreToolUse", **delete) == {}, "a delete publishes no tree"
+
+
+def test_a_branch_known_only_on_the_remote_is_judged_by_its_remote_tree(
+        repo: Path, data_dir: Path) -> None:
+    from review_gate import _gated_ref
+    _work(repo)
+    sh(repo, "git", "update-ref", "refs/remotes/origin/far", "HEAD")
+    assert _gated_ref(repo, "far") == "refs/remotes/origin/far"
+    assert _gated_ref(repo, "nowhere") is None, "unknown branch: fail open"
+
+
+def test_a_stale_lock_is_broken_once_and_a_live_one_is_put_back(tmp_path: Path) -> None:
+    from review_gate import _break_stale
+    stale = tmp_path / "s.lock"
+    stale.write_text("")
+    os.utime(stale, (1, 1))
+    _break_stale(stale)
+    assert not stale.exists()
+    live = tmp_path / "l.lock"  # another waiter replaced the stale lock before our rename
+    live.write_text("")
+    _break_stale(live)
+    assert live.exists(), "a fresh lock taken by mistake is restored"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["l.lock"]

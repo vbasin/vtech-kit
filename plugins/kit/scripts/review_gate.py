@@ -26,6 +26,8 @@ Known limits, each a nudge-sized gap rather than a forged review:
 - A reviewer asked about one named file still stamps the whole tree it started on.
 - A PR opened through `gh api` or the web UI is not seen, so its branch's pushes are not gated.
 - A branch stays gated for pushes after its PR closes (the last 50 branch names are kept).
+- A substitution inside single quotes (`echo '$(git push)'`) is read as a push: a false
+  reminder, never a missed one.
 - Hashing the tree with `git add -A` writes blobs for untracked files into `.git/objects`,
   which git prunes as unreachable objects.
 """
@@ -40,7 +42,7 @@ import tempfile
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 from kit_common import emit, git, load_config, read_input, repo_root, session_roots
 
@@ -79,7 +81,8 @@ def worktree_tree(root: Path) -> Optional[str]:
         else:
             os.unlink(tmp)  # git refuses an empty index file; a missing one is a fresh index
         env = dict(os.environ, GIT_INDEX_FILE=tmp)
-        if git(["add", "-A"], root, timeout=60, env=env) is None:
+        # 40s, under the hook's 60s, so a slow hash still reaches `finally` and removes tmp.
+        if git(["add", "-A"], root, timeout=40, env=env) is None:
             return None
         out = git(["write-tree"], root, env=env)
         return (out.strip() or None) if out is not None else None
@@ -98,10 +101,15 @@ def current_branch(root: Path) -> str:
     return out.strip() if out else ""
 
 
-def origin_slug(root: Path) -> str:
-    url = (git(["remote", "get-url", "origin"], root) or "").strip()
-    m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?/?$", url)
-    return m.group(1).lower() if m else ""
+def remote_slugs(root: Path) -> set:
+    """`owner/repo` of `origin` and `upstream`: a PR from a fork names the upstream repo."""
+    slugs = set()
+    for remote in ("origin", "upstream"):
+        url = (git(["remote", "get-url", remote], root) or "").strip()
+        m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?/?$", url)
+        if m:
+            slugs.add(m.group(1).lower())
+    return slugs
 
 
 # ── state ──────────────────────────────────────────────────────────────────────
@@ -151,7 +159,7 @@ def locked(root: Path) -> Iterator[None]:
         except FileExistsError:
             with suppress(OSError):
                 if time.time() - lock.stat().st_mtime > LOCK_STALE_S:
-                    lock.unlink()  # left by a hook that was killed
+                    _break_stale(lock)  # left by a hook that was killed
                     continue
             time.sleep(0.05)
         except OSError:
@@ -162,6 +170,21 @@ def locked(root: Path) -> Iterator[None]:
         if held and lock is not None:
             with suppress(OSError):
                 lock.unlink()
+
+
+def _break_stale(lock: Path) -> None:
+    """Remove a stale lock so that two waiters cannot both remove one and both take the next:
+    the rename is atomic, so only one of them gets the file, and a live lock it took by
+    mistake (another waiter replaced the stale one in between) is put back."""
+    victim = lock.with_name(f"{lock.name}.{os.getpid()}")
+    os.rename(str(lock), str(victim))
+    try:
+        if time.time() - victim.stat().st_mtime <= LOCK_STALE_S:
+            with suppress(OSError):
+                os.link(str(victim), str(lock))  # fails if a third waiter holds it now
+    finally:
+        with suppress(OSError):
+            victim.unlink()
 
 
 def _add(state: Dict[str, Any], key: str, value: str) -> None:
@@ -212,60 +235,119 @@ def on_stop(data: Dict[str, Any]) -> None:
 GH_GLOBAL_WITH_VALUE = {"-R", "--repo", "--hostname"}
 GIT_GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
 PUSH_WITH_VALUE = {"--repo", "-o", "--push-option", "--receive-pack", "--exec"}
+PUSH_NOT_THE_WORK = {"--delete", "-d", "--tags"}  # these publish no branch's tree
 # What can stand before the program in a simple command: shell keywords, `sudo`, `xargs`.
 LEADERS = {"!", "then", "do", "else", "elif", "if", "while", "until", "sudo", "xargs"}
-WRAPPER_WITH_VALUE = {"-u", "--unset", "-s", "--signal", "-k", "--kill-after", "-n", "-g", "-U"}
+# Options that take a separate value, per wrapper: `sudo -n` takes none, `nice -n` does.
+WRAPPER_WITH_VALUE = {
+    "nice": {"-n", "--adjustment"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "sudo": {"-u", "--user", "-g", "--group", "-U", "--other-user", "-C", "-h", "-p", "-D"},
+    "xargs": {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a"},
+}
 SHELLS = {"bash", "sh", "zsh", "dash"}
+SHELL_C = re.compile(r"-[a-zA-Z]*c[a-zA-Z]*")  # -c, and combined forms such as -lc and -ec
+SUBSTITUTION = re.compile(r"\$\(|`")
 RAW_PR = re.compile(r"\bgh\b[^\n;&|]*\bpr\s+create\b")
 RAW_PUSH = re.compile(r"\bgit\b[^\n;&|]*\bpush\b")
 
-Action = Tuple[str, Optional[str], Optional[str]]
+
+class Action(NamedTuple):
+    action: str  # "pr" or "push"
+    directory: Optional[str]  # from a leading `cd` or `git -C`; None for the session's cwd
+    ref: Optional[str]  # the local branch whose tree is published; None for HEAD
+    name: Optional[str]  # the branch name on GitHub; None for the current branch
+    repo: Optional[str] = None  # `gh -R owner/repo`
+
+
+def strip_comments(command: str) -> str:
+    """Drop `# ...` comments but keep the newline that ends them. shlex's own comment handling
+    eats that newline, which joins the next command onto the commented one."""
+    out, quote, i = [], "", 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(command):
+                out.append(command[i:i + 2])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\" and i + 1 < len(command):
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or command[i - 1] in " \t\n;&|()"):
+            end = command.find("\n", i)
+            i = len(command) if end < 0 else end
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def bash_actions(command: str, directory: Optional[str] = None, depth: int = 0) -> List[Action]:
-    """(action, directory, branch) for each `gh pr create` or `git push` the command runs.
-    `directory` follows a leading `cd` and `git -C`; `branch` is the PR's head or the pushed
-    branch, None for the current one."""
+    """Each `gh pr create` or `git push` the command runs, including inside `bash -c`, `eval`
+    and `$(...)`. Pushes that publish no branch (`--delete`, `--tags`, `:branch`) are left out."""
     from bash_guard import WRAPPERS, _segments
 
+    command = strip_comments(command)
     segments = _segments(command)
     if not segments:  # unbalanced quotes and the like: fall back to the raw text
-        return ([("pr", directory, None)] if RAW_PR.search(command) else []) + (
-            [("push", directory, None)] if RAW_PUSH.search(command) else [])
+        return ([Action("pr", directory, None, None)] if RAW_PR.search(command) else []) + (
+            [Action("push", directory, None, None)] if RAW_PUSH.search(command) else [])
     found: List[Action] = []
     for seg in segments:
-        seg = [t.lstrip("$({`").rstrip(")}`") for t in seg]
-        seg = [t for t in seg if t]
-        i = 0
+        if depth < 3:  # a substitution quoted into one token: "$(git push)"
+            for tok in seg:
+                m = SUBSTITUTION.search(tok)
+                if m and " " in tok[m.end():]:
+                    found.extend(bash_actions(tok[m.end():].rstrip(")`"), directory, depth + 1))
+        seg = [t.rstrip(")`") for t in seg]
+        i, wrapper = 0, ""
         while i < len(seg):  # past wrappers and what they take: `timeout -s KILL 60`, `FOO=bar`
-            tok = seg[i]
-            if tok in WRAPPERS or tok in LEADERS or ASSIGNMENT.match(tok) or DURATION.match(tok):
+            tok = seg[i].lstrip("$({`")
+            value = ASSIGNMENT.sub("", tok, count=1) if ASSIGNMENT.match(tok) else None
+            if value is not None and SUBSTITUTION.match(value):
+                seg[i] = value  # x=$(git push): the substitution is the command
+            elif not tok or tok in LEADERS or value is not None or DURATION.match(tok):
                 i += 1
+            elif tok in WRAPPERS or tok in WRAPPER_WITH_VALUE:
+                wrapper, i = tok, i + 1
             elif tok.startswith("-"):
-                i += 2 if tok in WRAPPER_WITH_VALUE else 1
+                i += 2 if tok in WRAPPER_WITH_VALUE.get(wrapper, ()) else 1
             else:
                 break
         if i >= len(seg):
             continue
-        prog, rest = seg[i].rsplit("/", 1)[-1], seg[i + 1:]
+        prog, rest = seg[i].lstrip("$({`").rsplit("/", 1)[-1], seg[i + 1:]
+        flag = next((j for j, t in enumerate(rest) if SHELL_C.fullmatch(t)), None)
         if prog == "cd" and rest:
             directory = _join(directory, rest[0])
-        elif prog in SHELLS and "-c" in rest and depth < 3:
-            script = rest[rest.index("-c") + 1:rest.index("-c") + 2]
-            found.extend(bash_actions(script[0], directory, depth + 1) if script else [])
+        elif prog in SHELLS and flag is not None and flag + 1 < len(rest) and depth < 3:
+            found.extend(bash_actions(rest[flag + 1], directory, depth + 1))
+        elif prog == "eval" and rest and depth < 3:
+            found.extend(bash_actions(" ".join(rest), directory, depth + 1))
         elif prog == "gh":
             if _positional(rest, GH_GLOBAL_WITH_VALUE)[:2] == ["pr", "create"]:
                 head = _option(rest, ("-H", "--head"))
-                found.append(("pr", directory, head.split(":")[-1] if head else None))
+                branch = head.split(":")[-1] if head else None
+                repo = _option(rest, ("-R", "--repo"))
+                found.append(Action("pr", directory, branch, branch, repo))
         elif prog == "git":
             where = _option(rest, ("-C",))
             target = _join(directory, where) if where else directory
             words = _positional(rest, GIT_GLOBAL_WITH_VALUE)
             if words[:1] == ["push"]:
                 after = rest[rest.index("push") + 1:]
+                if PUSH_NOT_THE_WORK & set(after):
+                    continue
                 refspecs = _positional(after, PUSH_WITH_VALUE)[1:]  # after the remote
-                branches = [_pushed_branch(r) for r in refspecs] or [None]
-                found.extend(("push", target, b) for b in branches)
+                pushed = [_pushed(r) for r in refspecs] if refspecs else [(None, None)]
+                found.extend(Action("push", target, ref, name) for ref, name in pushed if ref != "")
     return found
 
 
@@ -274,11 +356,17 @@ def _join(base: Optional[str], path: str) -> str:
     return path if os.path.isabs(path) or base is None else os.path.join(base, path)
 
 
-def _pushed_branch(refspec: str) -> Optional[str]:
-    src = refspec.lstrip("+").split(":", 1)[0]
-    if src.startswith("refs/heads/"):
-        src = src[len("refs/heads/"):]
-    return None if src in ("", "HEAD") else src
+def _pushed(refspec: str) -> Tuple[Optional[str], Optional[str]]:
+    """(local branch, remote branch) of a refspec. None is HEAD or the current branch; a ref of
+    "" is an empty source, which deletes the remote branch and publishes nothing."""
+    def short(ref: str) -> str:
+        return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+
+    src, sep, dst = refspec.lstrip("+").partition(":")
+    if sep and not src:
+        return "", short(dst)
+    ref = None if src == "HEAD" else short(src)
+    return ref, (short(dst) if dst and dst != "HEAD" else ref)
 
 
 def _positional(args: List[str], with_value: set) -> List[str]:
@@ -305,11 +393,17 @@ def _option(args: List[str], names: Tuple[str, ...]) -> Optional[str]:
     return None
 
 
+def _slug(repo: str) -> str:
+    """`owner/repo` of a `gh -R` value, which may also be `HOST/OWNER/REPO` or a URL."""
+    parts = [p for p in re.sub(r"\.git$", "", repo.strip()).split("/") if p]
+    return "/".join(parts[-2:]).lower()
+
+
 def _pick(candidates: List[Path], slug: str) -> Optional[Path]:
-    """The checkout the PR is opened from. A checkout whose origin names another repo is not
-    it; one with no GitHub origin is accepted only when it is the only checkout."""
-    slugs = {r: origin_slug(r) for r in candidates}
-    matching = [r for r, s in slugs.items() if s and s == slug]
+    """The checkout the PR is opened from. A checkout whose remotes name another repo is not
+    it; one with no GitHub remote is accepted only when it is the only checkout."""
+    slugs = {r: remote_slugs(r) for r in candidates}
+    matching = [r for r, s in slugs.items() if slug in s]
     if len(matching) == 1:
         return matching[0]
     if len(candidates) == 1 and not slugs[candidates[0]]:
@@ -327,14 +421,15 @@ def _gated_ref(root: Path, branch: Optional[str]) -> Optional[str]:
     return None
 
 
-def decide(root: Path, action: str, branch: Optional[str]) -> Optional[str]:
-    """None to let the action through, else the reason it is denied. Records state."""
+def decide(root: Path, action: str, ref: Optional[str], name: Optional[str] = None) -> Optional[str]:
+    """None to let the action through, else the reason it is denied. Records state.
+    `ref` is the local branch whose tree is published, `name` the branch it lands on."""
     gate = mode(root)
     if gate == "off":
         return None
-    name = branch or current_branch(root)
-    ref = _gated_ref(root, branch)
-    tree = ref_tree(root, ref) if ref else None
+    name = name or ref or current_branch(root)
+    gated = _gated_ref(root, ref)
+    tree = ref_tree(root, gated) if gated else None
     if tree is None:
         return None
     with locked(root):
@@ -365,24 +460,29 @@ def on_pre_tool(data: Dict[str, Any]) -> None:
     tool = str(data.get("tool_name") or "")
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else None
-    targets: List[Tuple[Path, str, Optional[str]]] = []
+    targets: List[Tuple[Path, str, Optional[str], Optional[str]]] = []
     if tool.startswith("mcp__") and tool.endswith("create_pull_request"):
         slug = f"{tool_input.get('owner', '')}/{tool_input.get('repo', '')}".lower()
         root = _pick(session_roots(cwd), slug)
         head = tool_input.get("head") if isinstance(tool_input.get("head"), str) else None
+        branch = head.split(":")[-1] if head else None
         if root is not None:
-            targets.append((root, "pr", head.split(":")[-1] if head else None))
+            targets.append((root, "pr", branch, branch))
     elif tool == "Bash":
         command = tool_input.get("command") if isinstance(tool_input.get("command"), str) else ""
         if not command or not QUICK.search(command):
             return
-        for action, directory, head in bash_actions(command):
-            base = _join(cwd or os.getcwd(), directory) if directory else cwd
+        for act in bash_actions(command):
+            base = _join(cwd or os.getcwd(), act.directory) if act.directory else cwd
             root = repo_root(base)
-            if root is not None:
-                targets.append((root, action, head))
-    for root, action, head in targets:
-        reason = decide(root, action, head)
+            if root is None:
+                continue
+            slugs = remote_slugs(root)
+            if act.repo and slugs and _slug(act.repo) not in slugs:
+                continue  # `gh -R` names a repo this checkout is not: its tree is unknown here
+            targets.append((root, act.action, act.ref, act.name))
+    for root, action, ref, name in targets:
+        reason = decide(root, action, ref, name)
         if reason:
             emit({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                          "permissionDecision": "deny",
