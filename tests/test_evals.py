@@ -174,6 +174,7 @@ def test_the_suite_covers_what_the_kit_claims() -> None:
         "the design is Claude's to settle": "design-not-handed-back",
         "trivial work stays trivial": "obvious-fix-stays-cheap",
         "duplication is a reportable defect": "duplication-is-a-defect",
+        "a review tries every failure outcome and every input form": "review-tries-the-failure-paths",
         "independent work gets fanned out": "sweep-gets-fanned-out",
         "a decision already on record is reused, not re-derived": "prior-decision-is-reused",
         "a decision whose reversal condition fired is reopened from the old field": "reversed-decision-reopens",

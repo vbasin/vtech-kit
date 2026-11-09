@@ -12,7 +12,7 @@ You audit a change for information that would not have been available at decisio
 
 Start by finding the repo's own causality contract and helpers. Read the CLAUDE.md/AGENTS.md rules, then search for docs and code such as `DATA_CONTRACTS`, `causal`, `as_of`, `asof`, `merge_asof`, `available_at`, `closed bar`. The repo's rule wins over generic advice. If it says to use a specific as-of helper, any hand-rolled lookup is a finding.
 
-Then find the change: use the files or range you were given, otherwise `git diff HEAD` and `git status --short`.
+Then find the change: use the files or range you were given, otherwise the whole branch (`git diff $(git merge-base <default branch> HEAD)`, which includes uncommitted work, plus `git status --short`).
 
 Check each changed feature, context, label and evaluation path for:
 - **Timestamp semantics:** is a bar stamped at its open or its close, and is it used before it closes? Are session boundaries, rolls, timezones and DST handled so nothing from T+ leaks into T?

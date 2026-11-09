@@ -8,7 +8,7 @@ effort: high
 color: red
 ---
 
-You audit a code change for security problems. Find the change with `git diff HEAD` and `git status --short` unless you were given files or a range.
+You audit a code change for security problems. Unless you were given files or a range, the change is the whole branch (`git diff $(git merge-base <default branch> HEAD)`, which includes uncommitted work, plus `git status --short`). `git diff HEAD` alone is empty once the work is committed.
 
 Check for:
 - SQL built with f-strings, `%` formatting or concatenation instead of driver parameters

@@ -74,7 +74,7 @@ A repo points `deliver` at its own gates and reviewers in `.claude/kit.json`:
 
 ## How verification works
 
-`kit` runs six small stdlib-only Python hooks (`plugins/kit/scripts/`):
+`kit` runs seven small stdlib-only Python hooks (`plugins/kit/scripts/`):
 
 | Hook | Script | Does |
 |---|---|---|
@@ -82,6 +82,8 @@ A repo points `deliver` at its own gates and reviewers in `.claude/kit.json`:
 | SessionStart | `session_policy.py` | Prints the routing policy into the session, so one prompt reaches both the right approach and the right scale of work |
 | PreToolUse (Bash) | `bash_guard.py` | Asks before `DROP`/`TRUNCATE`/`DELETE` without `WHERE`/chunk operations, before full-suite pytest runs (opt-in), and before repo-specific patterns |
 | PostToolUse (Edit/Write) | `post_edit.py` | Remembers the edited file and lints it at once |
+| SubagentStart/Stop (`kit:reviewer`) | `review_gate.py` | Stamps the working tree a `kit:reviewer` run started on as reviewed, if the tree is unchanged when it finishes |
+| PreToolUse (Bash, `*create_pull_request`) | `review_gate.py` | Denies opening a PR (an MCP `create_pull_request` tool or `gh pr create`) from a tree no reviewer stamped, and pushing to a branch that already has a PR. `review.gate` in `.claude/kit.json`: `once` (default) reminds once per tree, then lets the retry through; `deny` holds until it is reviewed; `off`. Claude Code only, since Codex and Grok have no subagent events |
 | Stop | `stop_verify.py` | Lints the session's changed `.py` files and runs the tests related to them, as explicit paths: their own test files and every test whose imports reach them, nearest first, up to `tests.max_files`. On failure it sends the output back so Claude keeps working. Gaps it cannot close (files no gate covers, tests left out by the cap) are shown to you once and do not block. A diff that already passed is not re-run on the next turn. If Claude stops again with the same failure, it lets the stop through with a notice, so a pre-existing failure can't trap a session |
 | Stop | `learning_report.py stop` | Records the skills, agents, MCP servers and development tools this turn added, with what each is for and the decision log written for it. Once per new skill or agent, it asks Claude why it was needed and to commit it, and it asks Claude to move a skill or agent saved only under `~/.claude` into the repo. Then it sends the repo's queue when both the machine and the repo opt in (see below). A cloud container can be discarded without a SessionEnd, so this is where a cloud session reports |
 | SessionEnd | `learning_report.py` | The same capture and send, for anything the last turn left |
@@ -136,6 +138,11 @@ python -m pytest tests          # hook tests + eval-suite schema (no network, no
 claude plugin validate .        # marketplace + both plugins
 claude --plugin-dir ./plugins/kit   # try local edits without pushing
 ```
+
+This repo loads its own released plugin (`.claude/settings.json`) with `review.gate: "deny"`
+(`.claude/kit.json`), so a branch here cannot reach a PR before `kit:reviewer` has seen it.
+The Stop hook runs the whole suite here, because the hook tests run the scripts as
+subprocesses, which the import graph cannot see.
 
 CI runs both on every PR (`.github/workflows/validate.yml`). It does not run the eval
 suite: that needs model credentials in the environment, and a Claude subscription

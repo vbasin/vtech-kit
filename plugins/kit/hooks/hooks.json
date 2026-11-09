@@ -30,6 +30,17 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "^(Bash|mcp__.*create_pull_request)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/review_gate.py"],
+            "timeout": 60
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -41,6 +52,32 @@
             "command": "python3",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/post_edit.py"],
             "timeout": 90
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "kit:reviewer",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/review_gate.py"],
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "kit:reviewer",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/review_gate.py"],
+            "timeout": 60
           }
         ]
       }

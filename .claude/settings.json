@@ -1,0 +1,10 @@
+{
+  "extraKnownMarketplaces": {
+    "vtech-kit": {
+      "source": { "source": "github", "repo": "vbasin/vtech-kit" }
+    }
+  },
+  "enabledPlugins": {
+    "kit@vtech-kit": true
+  }
+}

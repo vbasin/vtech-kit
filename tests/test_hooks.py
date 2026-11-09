@@ -1394,3 +1394,226 @@ def test_session_end_releases_what_the_last_stop_held(repo: Path, data_dir: Path
     assert learn(tmp_path, data_dir, base, "stop")["decision"] == "block"
     learn(tmp_path, data_dir, base)
     assert '"title": "[kit-learning] skill: trace-repro"' in gh_log(tmp_path)
+
+
+# ── review gate ────────────────────────────────────────────────────────────────
+from review_gate import bash_actions  # noqa: E402
+
+
+def _gate(repo: Path, data_dir: Path, event: str, **fields) -> dict:
+    return hook("review_gate.py", {"hook_event_name": event, "cwd": str(repo), **fields}, data_dir)
+
+
+def _review(repo: Path, data_dir: Path, agent: str = "a1", agent_type: str = "kit:reviewer",
+            edit_during: bool = False, message: str = "Looks correct.\nReview complete: no defects") -> None:
+    _gate(repo, data_dir, "SubagentStart", agent_id=agent, agent_type=agent_type)
+    if edit_during:
+        (repo / "src" / "pkg" / "other.py").write_text("def other():\n    return 3\n")
+    _gate(repo, data_dir, "SubagentStop", agent_id=agent, agent_type=agent_type,
+          last_assistant_message=message)
+
+
+def _open_pr(repo: Path, data_dir: Path, head: str = "") -> dict:
+    return _gate(repo, data_dir, "PreToolUse", tool_name="mcp__github__create_pull_request",
+                 tool_input={"owner": "o", "repo": "r", "head": head, "base": "main"})
+
+
+def _denied(out: dict) -> bool:
+    return out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+
+def _work(repo: Path, message: str = "work") -> None:
+    (repo / "src" / "pkg" / "mathx.py").write_text("def double(x):\n    return x + x\n")
+    commit(repo, message)
+
+
+def test_a_pr_from_an_unreviewed_tree_is_denied_and_a_reviewed_one_goes_through(
+        repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    _work(repo)
+    out = _open_pr(repo, data_dir)
+    assert _denied(out) and "kit:reviewer" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert _denied(_open_pr(repo, data_dir)), "deny mode keeps denying"
+    _review(repo, data_dir)
+    assert _open_pr(repo, data_dir) == {}
+
+
+def test_a_review_before_the_commit_covers_the_commit(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    commit(repo, "config")
+    (repo / "src" / "pkg" / "new.py").write_text("X = 1\n")  # untracked, then committed
+    _review(repo, data_dir)
+    commit(repo, "work")
+    assert _open_pr(repo, data_dir) == {}
+
+
+def test_a_fix_after_the_review_needs_its_own_review(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    _work(repo)
+    _review(repo, data_dir)
+    (repo / "src" / "pkg" / "mathx.py").write_text("def double(x):\n    return 2 * x\n")
+    commit(repo, "fix")
+    assert _denied(_open_pr(repo, data_dir))
+
+
+@pytest.mark.parametrize("case", ["edited-while-reading", "other-agent", "no-answer", "stopped-early", "no-start"])
+def test_only_a_finished_reviewer_on_an_unchanged_tree_stamps_it(
+        repo: Path, data_dir: Path, case: str) -> None:
+    set_config(repo, review={"gate": "deny"})
+    _work(repo)
+    if case == "edited-while-reading":
+        _review(repo, data_dir, edit_during=True)
+        commit(repo, "edit")
+    elif case == "other-agent":
+        _review(repo, data_dir, agent_type="Explore")
+    elif case == "no-answer":
+        _review(repo, data_dir, message="  ")
+    elif case == "stopped-early":
+        _review(repo, data_dir, message="You've hit your usage limit.")
+    else:
+        _gate(repo, data_dir, "SubagentStop", agent_id="zz", agent_type="kit:reviewer",
+              last_assistant_message="fine")
+    assert _denied(_open_pr(repo, data_dir))
+
+
+def test_once_mode_reminds_once_per_tree_then_lets_the_retry_through(repo: Path, data_dir: Path) -> None:
+    _work(repo)  # default mode is "once"
+    first = _open_pr(repo, data_dir)
+    assert _denied(first) and "one reminder" in first["hookSpecificOutput"]["permissionDecisionReason"]
+    assert _open_pr(repo, data_dir) == {}
+    # a new tree gets its own reminder
+    (repo / "src" / "pkg" / "other.py").write_text("def other():\n    return 2\n")
+    commit(repo, "more")
+    assert _denied(_open_pr(repo, data_dir))
+
+
+def test_off_mode_never_gates_and_never_stamps(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "off"})
+    _work(repo)
+    _review(repo, data_dir)
+    assert _open_pr(repo, data_dir) == {}
+    common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=repo, capture_output=True,
+                            text=True).stdout.strip()
+    assert not (repo / common / "kit-review.json").exists()
+
+
+def test_pushes_are_gated_only_on_a_branch_that_has_a_pr(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    sh(repo, "git", "checkout", "-qb", "feature")
+    _work(repo)
+    push = {"tool_name": "Bash", "tool_input": {"command": "git push -u origin feature"}}
+    assert _gate(repo, data_dir, "PreToolUse", **push) == {}, "no PR yet: a push is work in progress"
+    _review(repo, data_dir)
+    assert _open_pr(repo, data_dir, head="feature") == {}
+    (repo / "src" / "pkg" / "other.py").write_text("def other():\n    return 5\n")
+    commit(repo, "fix after review")
+    push["tool_input"]["command"] = "git push"
+    out = _gate(repo, data_dir, "PreToolUse", **push)
+    assert _denied(out) and "push" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    _review(repo, data_dir, agent="a2")
+    assert _gate(repo, data_dir, "PreToolUse", **push) == {}
+
+
+def test_gh_pr_create_is_gated_like_the_mcp_tool(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    _work(repo)
+    out = _gate(repo, data_dir, "PreToolUse", tool_name="Bash",
+                tool_input={"command": "git status && GH_PAGER= gh pr create --fill"})
+    assert _denied(out)
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("gh pr create --fill", [("pr", None, None)]),
+    ("gh -R o/r pr create -H feat", [("pr", None, "feat")]),
+    ("gh pr view 3", []),
+    ("git -C sub push origin x", [("push", "sub", "x")]),
+    ("timeout 60 git -c a=b push", [("push", None, None)]),
+    ("git log --grep push", []),
+    ("echo 'git push'", []),
+    ("git status\ngit push", [("push", None, None)]),
+    ("gh pr create -Hfeat", [("pr", None, "feat")]),
+    ("gh pr create --head me:feat", [("pr", None, "feat")]),
+    ("bash -c 'gh pr create --fill'", [("pr", None, None)]),
+    ("(git push)", [("push", None, None)]),
+    ("{ git push; }", [("push", None, None)]),
+    ("if true; then git push; fi", [("push", None, None)]),
+    ("! git push", [("push", None, None)]),
+    ("sudo git push", [("push", None, None)]),
+    ("env -u X git push", [("push", None, None)]),
+    ("timeout -s KILL 60 git push", [("push", None, None)]),
+    ("git push origin feature", [("push", None, "feature")]),
+    ("git push -u origin +HEAD:refs/heads/x", [("push", None, None)]),
+    ("git push origin a b:c", [("push", None, "a"), ("push", None, "b")]),
+    ("cd sub && git push", [("push", "sub", None)]),
+    ("cd /abs && git -C inner push", [("push", "/abs/inner", None)]),
+    ("echo \"it's && git push", [("push", None, None)]),
+])
+def test_bash_actions_finds_pr_creation_and_pushes(command: str, expected: list) -> None:
+    assert bash_actions(command) == expected
+
+
+def test_the_gate_finds_the_repo_beneath_a_cloud_session(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    sh(repo, "git", "remote", "add", "origin", "https://github.com/o/r.git")
+    _work(repo)
+    out = hook("review_gate.py", {"hook_event_name": "PreToolUse", "cwd": str(repo.parent),
+                                  "tool_name": "mcp__github__create_pull_request",
+                                  "tool_input": {"owner": "O", "repo": "R", "head": ""}}, data_dir)
+    assert _denied(out)
+
+
+def test_the_gate_fails_open_outside_a_repo(tmp_path: Path, data_dir: Path) -> None:
+    empty = tmp_path / "nowhere"
+    empty.mkdir()
+    assert _open_pr(empty, data_dir) == {}
+    assert hook("review_gate.py", {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                   "tool_input": {"command": None}}, data_dir) == {}
+
+
+def test_an_untracked_file_at_review_time_does_not_block_the_reviewed_commit(
+        repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    _work(repo)
+    (repo / "notes.txt").write_text("scratch\n")  # never committed
+    _review(repo, data_dir)
+    assert _open_pr(repo, data_dir) == {}
+
+
+def test_a_verdict_quoted_mid_message_is_not_a_finished_review(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    _work(repo)
+    _review(repo, data_dir, message="It should end with `Review complete: N findings`.\nI stopped here.")
+    assert _denied(_open_pr(repo, data_dir))
+
+
+def test_a_push_of_another_branch_is_judged_by_that_branch(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    sh(repo, "git", "checkout", "-qb", "feature")
+    _work(repo)
+    _review(repo, data_dir)
+    assert _open_pr(repo, data_dir, head="feature") == {}
+    (repo / "src" / "pkg" / "other.py").write_text("def other():\n    return 9\n")
+    commit(repo, "unreviewed fix")
+    sh(repo, "git", "checkout", "-q", "-")
+    push = {"tool_name": "Bash", "tool_input": {"command": "git push origin feature"}}
+    assert _denied(_gate(repo, data_dir, "PreToolUse", **push)), "checked out elsewhere, feature is still gated"
+
+
+def test_a_pr_for_another_repo_is_not_judged_by_this_checkout(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    sh(repo, "git", "remote", "add", "origin", "https://github.com/o/r.git")
+    _work(repo)
+    out = _gate(repo, data_dir, "PreToolUse", tool_name="mcp__github__create_pull_request",
+                tool_input={"owner": "o", "repo": "elsewhere", "head": "x"})
+    assert out == {}
+
+
+def test_a_stale_lock_does_not_stop_the_stamp(repo: Path, data_dir: Path) -> None:
+    set_config(repo, review={"gate": "deny"})
+    _work(repo)
+    lock = repo / ".git" / "kit-review.json.lock"
+    lock.write_text("")
+    os.utime(lock, (1, 1))
+    _review(repo, data_dir)
+    assert _open_pr(repo, data_dir) == {}
+    assert not lock.exists()

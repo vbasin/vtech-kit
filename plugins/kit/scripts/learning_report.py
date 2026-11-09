@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from kit_common import emit, git, load_config, load_state, read_input, repo_root, save_state
+from kit_common import emit, git, load_config, load_state, read_input, repo_root, save_state, session_roots
 
 PLUGIN = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN / "portable" / "kit-deliver" / "scripts"))
@@ -298,20 +298,6 @@ def send_repo(root: Path, path: Path, budget_s: float = 40.0) -> Optional[Dict[s
     return None
 
 
-def learning_roots(cwd: Optional[str]) -> List[Path]:
-    """The repo the session runs in; or, when it runs above its checkouts (a claude.ai cloud
-    session starts in the home folder with each repo cloned beneath it), those checkouts."""
-    root = repo_root(cwd)
-    if root is not None:
-        return [root]
-    base = Path(cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
-    try:
-        children = sorted(p for p in base.iterdir() if p.is_dir() and (p / ".git").exists())
-    except OSError:
-        return []
-    return [p for p in (repo_root(str(c)) for c in children[:50]) if p is not None][:10]
-
-
 def user_inventory() -> List[str]:
     """Skills and agents saved for the user rather than in a repo: they reach no repo, no
     other machine and no learning report, and a cloud container discards them."""
@@ -332,7 +318,7 @@ def begin(session_id: str, cwd: Optional[str]) -> None:
     state = load_state(sid)
     if state.get("roots") is not None:  # resume / compact: keep the original inventory
         return
-    state["roots"] = {str(r): start_inventory(r) for r in learning_roots(cwd)}
+    state["roots"] = {str(r): start_inventory(r) for r in session_roots(cwd)}
     state["user"] = user_inventory()
     save_state(sid, state)
 
@@ -340,7 +326,7 @@ def begin(session_id: str, cwd: Optional[str]) -> None:
 def _roots_state(session_id: str, cwd: Optional[str]) -> Dict[str, Any]:
     state = load_state(learning_id(session_id))
     roots = state.setdefault("roots", {})
-    for root in learning_roots(cwd):
+    for root in session_roots(cwd):
         if str(root) not in roots:
             # Started before this hook existed, or cloned mid-session: its inventory from now.
             old = load_state(session_id)
@@ -361,7 +347,7 @@ def main(backlog_file: Optional[Path] = None) -> int:
     state = _roots_state(session_id, data.get("cwd"))
     for ident in state.pop("awaiting", []):  # no later Stop will release them
         backlog.release(path, ident)
-    roots = learning_roots(data.get("cwd"))
+    roots = session_roots(data.get("cwd"))
     for root in roots:  # record everything first, then send in what time is left
         capture(root, state["roots"][str(root)], path, send=False)
     save_state(learning_id(session_id), state)
@@ -398,7 +384,7 @@ def stop_main(backlog_file: Optional[Path] = None) -> int:
     path = backlog_file or backlog.DEFAULT
     scripts = PLUGIN / "portable" / "kit-deliver" / "scripts" / "backlog.py"
     state = _roots_state(session_id, data.get("cwd"))
-    roots = learning_roots(data.get("cwd"))
+    roots = session_roots(data.get("cwd"))
     asks: List[str] = []
     # Asked last Stop and still without a reason: send them without one from now on.
     for ident in state.pop("awaiting", []):

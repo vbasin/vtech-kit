@@ -23,13 +23,13 @@ calls per `llm` grader per run. `--runs 2` and `--case <glob>` are the two dials
 Everything here is read-only: no `--allow-tools`, no `--scaffold`, no fixtures on disk —
 each prompt carries whatever the task needs, so the suite never touches a real repo.
 
-Two cases grant `Agent`, which is in the read-only set and so needs no `--allow-tools`:
+Three cases grant `Agent`, which is in the read-only set and so needs no `--allow-tools`:
 `design-not-handed-back`, because `deliberate` step 5 sends the candidates to
-`kit:design-critic`, and `duplication-is-a-defect`, because the review it asks for is
-`kit:reviewer`'s job. Without it those cases would measure a version of the kit with its
-adversary removed — the part most likely to be carrying the Δ. They pay for it in turns
+`kit:design-critic`, and `duplication-is-a-defect` and `review-tries-the-failure-paths`,
+because the review they ask for is `kit:reviewer`'s job. Without it those cases would
+measure a version of the kit with its adversary removed — the part most likely to be carrying the Δ. They pay for it in turns
 and tokens, which is why their `max_turns` and `timeout_seconds` are higher than the
-rest. `prior-decision-is-reused` grants it for the same reason as the first two, inverted: if
+rest. `prior-decision-is-reused` grants it for the same reason as the first three, inverted: if
 a run ignores the record and re-derives the choice, delegating to the critic is part of
 what that costs, and the trace grader should be able to see it happen.
 `reversed-decision-reopens` grants it because there the deliberation is the *correct*
@@ -60,6 +60,7 @@ read its Δ.
 | `design-not-handed-back` | The design is Claude's to settle, and it settles it by comparing rivals against stated criteria | Positive: the deliberation loop is doing work a bare session doesn't |
 | `obvious-fix-stays-cheap` | The kit doesn't charge design ceremony for a one-line fix | **Near zero is the pass.** Strongly negative means the kit is making trivial work expensive |
 | `duplication-is-a-defect` | Duplication and dead config are reportable defects, named at their location | Positive: the standards floor in `deliver` and `reviewer` is landing |
+| `review-tries-the-failure-paths` | A review of a committed branch finds a failed lookup read as "nothing there" and a parser that knows one input form | Positive: `reviewer`'s adversarial passes are landing. Both are Copilot findings from PR #16, on a committed branch where `git diff HEAD` is empty |
 | `sweep-gets-fanned-out` | Independent work that can't be scripted gets fanned out, one route is chosen rather than offered, and the unit each worker gets is named | Positive: the routing table is being used, not just read |
 | `prior-decision-is-reused` | A decision already on record is reused rather than re-derived, while its reversal conditions hold | Positive: the loop reads what it wrote, so the same ground isn't re-covered |
 | `reversed-decision-reopens` | The same log, with a reversal condition now true: the decision is reopened, and the recorded candidates and objections are the starting set | Positive: a superseded decision is still most of the work, and the kit spends it |

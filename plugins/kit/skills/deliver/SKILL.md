@@ -77,10 +77,14 @@ Never change the session's model or effort yourself. If the task needs a differe
 4. Run `kit:reviewer` on any non-trivial diff, plus every `routing.reviewers` agent whose globs match the changed files. Run them in parallel, in one message.
 5. Act on findings that affect correctness, safety, testability or duplication. Say which ones you skipped and why — acting on every nitpick is its own failure.
 6. **Any edit you made in steps 3 to 5 puts the diff back where it started.** Before you
-   report, re-run the gates whose globs match what changed and `/kit:verify`. Re-run a
-   reviewer only when the fix touched what it flagged, or when a newly touched path brings
-   a `routing.reviewers` glob into scope. What you report as verified has to be the diff
-   you are delivering, not the one you checked two edits ago.
+   report, re-run the gates whose globs match what changed and `/kit:verify`, and run
+   `kit:reviewer` again on what the fixes changed: a fix commit is new code, and that is
+   where the second-round defects come from. Also re-run any `routing.reviewers` agent whose
+   glob a newly touched path brings into scope. What you report as verified has to be the
+   diff you are delivering, not the one you checked two edits ago.
+7. Before opening a PR, or pushing to a branch that has one, the last `kit:reviewer` run
+   must have seen the tree you are about to push. The review gate hook enforces this
+   (`review.gate` in `.claude/kit.json`) and says what to run if it was not.
 
 A test that fails for a reason your change did not introduce stays failing: say so, do not fix it in passing, and never skip or delete a test to get green.
 

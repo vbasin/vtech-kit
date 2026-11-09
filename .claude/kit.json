@@ -1,0 +1,26 @@
+{
+  "python": ["python3"],
+  "lint": {
+    "enabled": true,
+    "args": ["-m", "ruff", "check", "--output-format", "concise"]
+  },
+  "tests": {
+    "enabled": true,
+    "test_dirs": ["tests"],
+    "scope": "all",
+    "pytest_args": ["-q", "--tb=short", "-p", "no:cacheprovider"],
+    "timeout_s": 300
+  },
+  "review": { "gate": "deny" },
+  "routing": {
+    "enabled": true,
+    "note": "This repo is the kit itself, and main ships to every repo on its next update. The hook tests run the hook scripts as subprocesses, which the import graph cannot see, so the Stop hook runs the whole suite (about 45 s).",
+    "decisions": "docs/decisions",
+    "gates": [
+      { "paths": ["plugins/**", "tests/**", ".claude-plugin/**"], "command": "python -m pytest -q tests && claude plugin validate ." }
+    ],
+    "reviewers": [
+      { "paths": ["plugins/kit/scripts/**", "plugins/kit/portable/**/scripts/**"], "agent": "kit:security-reviewer" }
+    ]
+  }
+}
