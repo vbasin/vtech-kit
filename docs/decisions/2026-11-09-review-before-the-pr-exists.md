@@ -66,6 +66,7 @@ Rejected: it enforces nothing, it would duplicate the learning pipeline, and it 
   - Concurrent writes to the state file had no lock.
   - The remaining three are documented as limits in the script.
 - `kit:reviewer`, second round on the fixed script: eight findings, all acted on. Comments ended the line that followed them; `sudo -n`, `bash -lc`, `eval` and `x=$(git push)` went unseen; a fork's PR to its upstream and `gh -R` were judged by the wrong repo; `--delete`, `--tags` and `HEAD:feat` pushes were judged by the wrong tree or name; and a stale lock could be broken by two waiters at once.
+- `kit:reviewer`, third round on those fixes: three regressions the fixes introduced (`sudo -u` and `xargs -I` lost the program, `--tags` beside a branch skipped the push, a `$(...)` refspec was read as branch names), all fixed with tests. Two low-severity races are documented as limits. This is the deliver 6.6 amendment in action: each fix round introduced defects of its own.
 - Live, in Claude Code 2.1.319 with `--plugin-dir`: an unreviewed `gh pr create` was denied. A real `kit:reviewer` run stamped the tree, including with an untracked file present, and the same command then went through.
 
 ## Unresolved

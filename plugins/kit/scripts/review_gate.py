@@ -81,7 +81,7 @@ def worktree_tree(root: Path) -> Optional[str]:
         else:
             os.unlink(tmp)  # git refuses an empty index file; a missing one is a fresh index
         env = dict(os.environ, GIT_INDEX_FILE=tmp)
-        # 40s, under the hook's 60s, so a slow hash still reaches `finally` and removes tmp.
+        # 40s rather than the hook's 60s, so one slow hash usually still reaches `finally`.
         if git(["add", "-A"], root, timeout=40, env=env) is None:
             return None
         out = git(["write-tree"], root, env=env)
@@ -173,9 +173,9 @@ def locked(root: Path) -> Iterator[None]:
 
 
 def _break_stale(lock: Path) -> None:
-    """Remove a stale lock so that two waiters cannot both remove one and both take the next:
-    the rename is atomic, so only one of them gets the file, and a live lock it took by
-    mistake (another waiter replaced the stale one in between) is put back."""
+    """Remove a stale lock. The rename is atomic, so two waiters cannot both remove the same
+    file, and a live lock taken by mistake is put back. A third waiter can still slip in while
+    it is out, which only loses a stamp, as `locked` accepts."""
     victim = lock.with_name(f"{lock.name}.{os.getpid()}")
     os.rename(str(lock), str(victim))
     try:
@@ -235,10 +235,10 @@ def on_stop(data: Dict[str, Any]) -> None:
 GH_GLOBAL_WITH_VALUE = {"-R", "--repo", "--hostname"}
 GIT_GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
 PUSH_WITH_VALUE = {"--repo", "-o", "--push-option", "--receive-pack", "--exec"}
-PUSH_NOT_THE_WORK = {"--delete", "-d", "--tags"}  # these publish no branch's tree
-# What can stand before the program in a simple command: shell keywords, `sudo`, `xargs`.
-LEADERS = {"!", "then", "do", "else", "elif", "if", "while", "until", "sudo", "xargs"}
-# Options that take a separate value, per wrapper: `sudo -n` takes none, `nice -n` does.
+PUSH_DELETES = {"--delete", "-d"}  # publishes no branch's tree
+# Shell keywords that can stand before the program in a simple command.
+LEADERS = {"!", "then", "do", "else", "elif", "if", "while", "until"}
+# Wrappers whose options take a separate value: `sudo -n` takes none, `sudo -u` and `nice -n` do.
 WRAPPER_WITH_VALUE = {
     "nice": {"-n", "--adjustment"},
     "timeout": {"-s", "--signal", "-k", "--kill-after"},
@@ -343,9 +343,11 @@ def bash_actions(command: str, directory: Optional[str] = None, depth: int = 0) 
             words = _positional(rest, GIT_GLOBAL_WITH_VALUE)
             if words[:1] == ["push"]:
                 after = rest[rest.index("push") + 1:]
-                if PUSH_NOT_THE_WORK & set(after):
-                    continue
                 refspecs = _positional(after, PUSH_WITH_VALUE)[1:]  # after the remote
+                cut = next((j for j, r in enumerate(refspecs) if "$" in r or "`" in r), None)
+                refspecs = refspecs[:cut]  # a substitution spans tokens: `$(git branch ...)`
+                if PUSH_DELETES & set(after) or ("--tags" in after and not refspecs):
+                    continue
                 pushed = [_pushed(r) for r in refspecs] if refspecs else [(None, None)]
                 found.extend(Action("push", target, ref, name) for ref, name in pushed if ref != "")
     return found
@@ -395,7 +397,7 @@ def _option(args: List[str], names: Tuple[str, ...]) -> Optional[str]:
 
 def _slug(repo: str) -> str:
     """`owner/repo` of a `gh -R` value, which may also be `HOST/OWNER/REPO` or a URL."""
-    parts = [p for p in re.sub(r"\.git$", "", repo.strip()).split("/") if p]
+    parts = [p for p in re.sub(r"\.git$", "", repo.strip()).replace(":", "/").split("/") if p]
     return "/".join(parts[-2:]).lower()
 
 
@@ -478,8 +480,9 @@ def on_pre_tool(data: Dict[str, Any]) -> None:
             if root is None:
                 continue
             slugs = remote_slugs(root)
-            if act.repo and slugs and _slug(act.repo) not in slugs:
-                continue  # `gh -R` names a repo this checkout is not: its tree is unknown here
+            local_head = act.ref and ref_tree(root, f"refs/heads/{act.ref}")
+            if act.repo and slugs and _slug(act.repo) not in slugs and not local_head:
+                continue  # `gh -R` names a repo this checkout is not, and no local branch heads it
             targets.append((root, act.action, act.ref, act.name))
     for root, action, ref, name in targets:
         reason = decide(root, action, ref, name)

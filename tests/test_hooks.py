@@ -1559,6 +1559,11 @@ def test_gh_pr_create_is_gated_like_the_mcp_tool(repo: Path, data_dir: Path) -> 
     ("git push --tags", []),
     ("git push origin --delete feat", []),
     ("git push origin HEAD:feat", [("push", None, None, "feat", None)]),
+    ("sudo -u root git push origin feat", [("push", None, "feat", "feat", None)]),
+    ("xargs -I {} git push", [("push", None, None, None, None)]),
+    ("git push origin feat --tags", [("push", None, "feat", "feat", None)]),
+    ("git push origin $(git branch --show-current)", [("push", None, None, None, None)]),
+    ('git push origin "$(git branch --show-current)"', [("push", None, None, None, None)]),
 ])
 def test_bash_actions_finds_pr_creation_and_pushes(command: str, expected: list) -> None:
     assert bash_actions(command) == expected
@@ -1661,6 +1666,9 @@ def test_gh_pr_create_for_another_repo_is_not_judged_here(repo: Path, data_dir: 
     assert _gate(repo, data_dir, "PreToolUse", **other) == {}
     same = {"tool_name": "Bash", "tool_input": {"command": "gh pr create -R github.com/O/R --fill"}}
     assert _denied(_gate(repo, data_dir, "PreToolUse", **same))
+    sh(repo, "git", "checkout", "-qb", "feat")
+    fork = {"tool_name": "Bash", "tool_input": {"command": "gh pr create -R x/y --head me:feat"}}
+    assert _denied(_gate(repo, data_dir, "PreToolUse", **fork)), "a local head branch is judged"
 
 
 def test_a_push_under_another_name_is_gated_by_the_pr_branch_name(repo: Path, data_dir: Path) -> None:
