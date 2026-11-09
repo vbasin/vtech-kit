@@ -1561,6 +1561,7 @@ def test_gh_pr_create_is_gated_like_the_mcp_tool(repo: Path, data_dir: Path) -> 
     ("git push origin HEAD:feat", [("push", None, None, "feat", None)]),
     ("sudo -u root git push origin feat", [("push", None, "feat", "feat", None)]),
     ("xargs -I {} git push", [("push", None, None, None, None)]),
+    ("git push --tags origin $(git branch --show-current)", [("push", None, None, None, None)]),
     ("git push origin feat --tags", [("push", None, "feat", "feat", None)]),
     ("git push origin $(git branch --show-current)", [("push", None, None, None, None)]),
     ('git push origin "$(git branch --show-current)"', [("push", None, None, None, None)]),

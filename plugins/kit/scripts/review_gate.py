@@ -346,7 +346,7 @@ def bash_actions(command: str, directory: Optional[str] = None, depth: int = 0) 
                 refspecs = _positional(after, PUSH_WITH_VALUE)[1:]  # after the remote
                 cut = next((j for j, r in enumerate(refspecs) if "$" in r or "`" in r), None)
                 refspecs = refspecs[:cut]  # a substitution spans tokens: `$(git branch ...)`
-                if PUSH_DELETES & set(after) or ("--tags" in after and not refspecs):
+                if PUSH_DELETES & set(after) or ("--tags" in after and not refspecs and cut is None):
                     continue
                 pushed = [_pushed(r) for r in refspecs] if refspecs else [(None, None)]
                 found.extend(Action("push", target, ref, name) for ref, name in pushed if ref != "")
