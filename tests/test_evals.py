@@ -174,6 +174,7 @@ def test_the_suite_covers_what_the_kit_claims() -> None:
         "the design is Claude's to settle": "design-not-handed-back",
         "trivial work stays trivial": "obvious-fix-stays-cheap",
         "duplication is a reportable defect": "duplication-is-a-defect",
+        "a review tries every failure outcome and every input form": "review-tries-the-failure-paths",
         "independent work gets fanned out": "sweep-gets-fanned-out",
         "a decision already on record is reused, not re-derived": "prior-decision-is-reused",
         "a decision whose reversal condition fired is reopened from the old field": "reversed-decision-reopens",
@@ -183,5 +184,7 @@ def test_the_suite_covers_what_the_kit_claims() -> None:
         "a missing prerequisite is obtained during the task, not deferred": "capability-required",
         "a reusable candidate is scored against a baseline before it is shared": "reusable-capability",
         "learning reported by other repos becomes a scored PR, most-reported first": "learning-becomes-a-pr",
+        "what already ships is searched and is the baseline a new component must beat": "existing-tool-is-the-baseline",
+        "a defect that recurs after its lesson moves upstream, toward a check": "repeated-defect-moves-upstream",
     }.items():
         assert case in names, f"no case covers: {claim}"

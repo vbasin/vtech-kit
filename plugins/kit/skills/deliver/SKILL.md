@@ -62,6 +62,9 @@ Never change the session's model or effort yourself. If the task needs a differe
 
 ## 5. Run it
 
+- Before writing code in a file, run `python3 "${CLAUDE_PLUGIN_ROOT}/portable/kit-deliver/scripts/defects.py"` `rules --paths <the files>`. It lists the lessons
+  this repo has already paid for in review: the mistakes found in these files and this
+  area before. Apply them while you write, and pass them to any worker that writes code.
 - Each worker gets a brief that stands alone: the goal, the exact files or slice, the repo rules that bind it, the done-check, and the output format. Workers see none of this conversation.
 - A worker that edits code runs with `isolation: worktree`. Two agents never edit the same files in one checkout.
 - Keep intermediate output in files, not in this conversation. For a workflow, watch per-agent token use in `/workflows` and stop a run that loops.
@@ -74,13 +77,26 @@ Never change the session's model or effort yourself. If the task needs a differe
 3. Run `/simplify` when the change touched code that already existed, or added more than a
    few files. Do it before the reviewers, so they judge the code that will actually ship
    rather than a draft of it.
-4. Run `kit:reviewer` on any non-trivial diff, plus every `routing.reviewers` agent whose globs match the changed files. Run them in parallel, in one message.
+4. Run `kit:reviewer` on any non-trivial diff, plus every `routing.reviewers` agent whose
+   globs match the changed files. Also run Claude Code's built-in `/code-review high` when
+   the session has it: it catches different defects from `kit:reviewer`. Start them all in
+   parallel, in one message. Put the `defects.py rules --paths <changed files>` output from step 5 in
+   each reviewer's brief.
 5. Act on findings that affect correctness, safety, testability or duplication. Say which ones you skipped and why — acting on every nitpick is its own failure.
+   Record each finding you act on, from any reviewer and Copilot's on the PR included:
+   `python3 "${CLAUDE_PLUGIN_ROOT}/portable/kit-deliver/scripts/defects.py"` `add --category <c> --summary <what was wrong> --rule <the general lesson>
+   --source <reviewer> --path <file> [--pr <n>]`, adding `--id gh-<comment id>` for a PR
+   review comment so a later `harvest` knows it. The rule is the lesson for next time,
+   not this fix. The ledger is `.claude/defects.jsonl`; commit it with the fix.
 6. **Any edit you made in steps 3 to 5 puts the diff back where it started.** Before you
-   report, re-run the gates whose globs match what changed and `/kit:verify`. Re-run a
-   reviewer only when the fix touched what it flagged, or when a newly touched path brings
-   a `routing.reviewers` glob into scope. What you report as verified has to be the diff
-   you are delivering, not the one you checked two edits ago.
+   report, re-run the gates whose globs match what changed and `/kit:verify`, and run
+   `kit:reviewer` again on what the fixes changed: a fix commit is new code, and that is
+   where the second-round defects come from. Also re-run any `routing.reviewers` agent whose
+   glob a newly touched path brings into scope. What you report as verified has to be the
+   diff you are delivering, not the one you checked two edits ago.
+7. Before opening a PR, or pushing to a branch that has one, the last `kit:reviewer` run
+   must have seen the tree you are about to push. The review gate hook enforces this
+   (`review.gate` in `.claude/kit.json`) and says what to run if it was not.
 
 A test that fails for a reason your change did not introduce stays failing: say so, do not fix it in passing, and never skip or delete a test to get green.
 

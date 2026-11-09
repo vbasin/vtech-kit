@@ -38,6 +38,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "guards": {"sql_destructive": "ask", "pytest_full_suite": "off"},
     # Read by session_policy.py; `gates` and `reviewers` are read by the `deliver` skill.
     "routing": {"enabled": True, "note": "", "gates": [], "reviewers": []},
+    # Read by review_gate.py: "once" | "deny" | "off".
+    "review": {"gate": "once"},
 }
 
 
@@ -88,10 +90,11 @@ def emit(obj: Dict[str, Any]) -> None:
 
 
 # ── repo + config ──────────────────────────────────────────────────────────────
-def git(args: List[str], cwd: Path, timeout: int = 30) -> Optional[str]:
+def git(args: List[str], cwd: Path, timeout: int = 30,
+        env: Optional[Dict[str, str]] = None) -> Optional[str]:
     try:
         out = subprocess.run(
-            ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout
+            ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout, env=env
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -102,6 +105,20 @@ def repo_root(cwd: Optional[str]) -> Optional[Path]:
     start = Path(cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
     top = git(["rev-parse", "--show-toplevel"], start)
     return Path(top.strip()) if top else None
+
+
+def session_roots(cwd: Optional[str]) -> List[Path]:
+    """The repo the session runs in; or, when it runs above its checkouts (a claude.ai cloud
+    session starts in the home folder with each repo cloned beneath it), those checkouts."""
+    root = repo_root(cwd)
+    if root is not None:
+        return [root]
+    base = Path(cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+    try:
+        children = sorted(p for p in base.iterdir() if p.is_dir() and (p / ".git").exists())
+    except OSError:
+        return []
+    return [p for p in (repo_root(str(c)) for c in children[:50]) if p is not None][:10]
 
 
 def _merge(base: Dict[str, Any], over: Dict[str, Any]) -> Dict[str, Any]:
