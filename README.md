@@ -175,8 +175,12 @@ Files with nothing executable to check, such as documentation, data and images, 
 `verification.no_checks` (a list of globs) and are not reported:
 
 ```json
-"no_checks": ["docs/**", "**/*.md", "data/**", "**/*.png"]
+"no_checks": ["docs/**", "*.md", "data/**", "*.png"]
 ```
+
+Patterns are case-sensitive `fnmatch` patterns, not gitignore globs: `*` also crosses `/`,
+so `*.md` matches `README.md` and `docs/a/b.md`, while `**/*.md` misses files at the root.
+A `.py` file matched by `no_checks` skips related tests but is still linted.
 
 Commands run as argument arrays without a shell; `cwd` is optional and must remain within
 the repository. Python lint settings still apply. Gate coverage is a repo contract:

@@ -48,7 +48,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from gates import UNCOVERED, run_gates, uncovered_by_gates
+from gates import UNCOVERED, gate_paths, run_gates, uncovered_by_gates
 from kit_common import (
     CONFIG_RELPATH,
     changed_since,
@@ -346,13 +346,18 @@ def verify(root: Path, cfg: Dict[str, Any], changed: List[str],
     # Python files that only related tests can check: every changed one without gates, and
     # in a gated repo the ones no gate claims (they used to be reported as a bare gap).
     test_targets = changed_py
-    if gated:
+    # No runnable gate at all is a configuration failure (run_gates says so); don't also run
+    # tests and list every file as a gap next to it.
+    if gated and gate_paths(cfg):
         failures = [f for f in failures if not f.startswith(UNCOVERED)]
         uncovered = uncovered_by_gates(cfg, changed)
         test_targets = [f for f in uncovered if f.endswith(".py")] if tcfg.get("enabled") else []
         rest = [f for f in uncovered if f not in test_targets]
         if rest:
             gaps.append(UNCOVERED + ", ".join(rest))
+    elif gated:
+        failures = [f for f in failures if not f.startswith(UNCOVERED)]
+        test_targets = []
     else:
         non_python = [f for f in changed if not f.endswith(".py")]
         if non_python:

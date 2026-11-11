@@ -13,15 +13,21 @@ from kit_common import run, tail
 UNCOVERED = "No configured gate covers: "
 
 
+def valid_gate(gate: Any) -> bool:
+    """A gate run_gates will run: a name, non-empty string paths and an argv of strings."""
+    if not isinstance(gate, dict):
+        return False
+    name, paths, argv = gate.get("name"), gate.get("paths"), gate.get("argv")
+    return (isinstance(name, str) and bool(name) and isinstance(paths, list) and bool(paths)
+            and all(isinstance(p, str) and p for p in paths)
+            and isinstance(argv, list) and bool(argv) and all(isinstance(a, str) for a in argv))
+
+
 def gate_paths(config: Dict[str, Any]) -> List[str]:
-    """Every path pattern a well-formed gate declares."""
+    """Every path pattern a gate that will actually run declares."""
     gates = config.get("verification", {}).get("gates")
-    out: List[str] = []
-    for gate in gates if isinstance(gates, list) else []:
-        paths = gate.get("paths") if isinstance(gate, dict) else None
-        if isinstance(paths, list):
-            out.extend(p for p in paths if isinstance(p, str) and p)
-    return out
+    return [p for gate in (gates if isinstance(gates, list) else []) if valid_gate(gate)
+            for p in gate["paths"]]
 
 
 def uncovered_by_gates(config: Dict[str, Any], changed: List[str]) -> List[str]:
@@ -46,23 +52,16 @@ def run_gates(root: Path, config: Dict[str, Any], changed: List[str],
         return ["verification is enabled but no gates are configured"], []
     failures: List[str] = []
     ran: List[str] = []
-    covered = set()
     for gate in gates:
         if not isinstance(gate, dict):
             failures.append("invalid gate: expected an object")
             continue
-        name = gate.get("name")
-        paths = gate.get("paths")
-        argv = gate.get("argv")
-        if (not isinstance(name, str) or not name or not isinstance(paths, list) or not paths
-                or not all(isinstance(p, str) and p for p in paths)
-                or not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv)):
+        if not valid_gate(gate):
             failures.append("invalid gate: name, paths, and argv are required")
             continue
-        matches = {f for f in changed if any(fnmatch.fnmatchcase(f, pattern) for pattern in paths)}
-        if not matches:
+        name, paths, argv = gate["name"], gate["paths"], gate["argv"]
+        if not any(fnmatch.fnmatchcase(f, pattern) for f in changed for pattern in paths):
             continue
-        covered.update(matches)
         try:
             cwd = (root / gate.get("cwd", ".")).resolve()
             cwd.relative_to(root.resolve())
@@ -82,7 +81,7 @@ def run_gates(root: Path, config: Dict[str, Any], changed: List[str],
                 failures.append(f"Gate {name} failed (exit {result.returncode}):\n{output}")
         except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
             failures.append(f"Gate {name} unavailable: {exc}")
-    uncovered = [f for f in uncovered_by_gates(config, changed) if f not in covered]
+    uncovered = uncovered_by_gates(config, changed)
     if uncovered:
         failures.append(UNCOVERED + ", ".join(uncovered))
     return failures, ran

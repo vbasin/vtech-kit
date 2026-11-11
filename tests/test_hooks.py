@@ -905,9 +905,19 @@ def test_no_checks_files_are_not_gaps(repo: Path, data_dir: Path) -> None:
     set_config(repo, verification={"enabled": True, "gates": [GATE_OK], "no_checks": ["docs/**", "*.md"]})
     result = manual(repo, "src/app.ts", "docs/note.md", "README.md", data_dir=data_dir)
     assert result.returncode == 0, result.stdout
+    set_config(repo, verification={"no_checks": ["**/*.md"]})                  # needs a slash: misses root
+    result = manual(repo, "src/app.ts", "README.md", data_dir=data_dir)
+    assert result.returncode == 1 and "No configured gate covers: README.md" in result.stdout
     (repo / "data.csv").write_text("a\n")
     result = manual(repo, "data.csv", data_dir=data_dir)                        # not declared: still a gap
     assert result.returncode == 1 and "No configured gate covers: data.csv" in result.stdout
+
+
+def test_gated_repo_without_runnable_gates_reports_only_the_config(repo: Path, data_dir: Path) -> None:
+    set_config(repo, verification={"enabled": True, "gates": [{"name": "broken", "paths": ["src/**"]}]})
+    result = manual(repo, "src/pkg/mathx.py", data_dir=data_dir)
+    assert result.returncode == 1 and "invalid gate" in result.stdout
+    assert "tests run: none" in result.stdout and "No configured gate covers" not in result.stdout
 
 
 def test_invalid_no_checks_is_rejected(repo: Path, data_dir: Path) -> None:
