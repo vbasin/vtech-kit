@@ -920,6 +920,33 @@ def test_gated_repo_without_runnable_gates_reports_only_the_config(repo: Path, d
     assert "tests run: none" in result.stdout and "No configured gate covers" not in result.stdout
 
 
+def test_no_checks_applies_without_gates(repo: Path, data_dir: Path) -> None:
+    (repo / "docs").mkdir()
+    (repo / "docs/note.md").write_text("n\n")
+    set_config(repo, verification={"no_checks": ["*.md"]})
+    result = manual(repo, "src/pkg/mathx.py", "docs/note.md", data_dir=data_dir)
+    assert result.returncode == 0 and "non-Python" not in result.stdout, result.stdout
+
+
+def test_parallel_edit_hooks_keep_every_record(repo: Path, data_dir: Path) -> None:
+    # Parallel tool calls run post_edit hooks of one session at once; each must keep its record.
+    names = [f"src/pkg/f{i}.py" for i in range(12)]
+    for n in names:
+        (repo / n).write_text("x = 1\n")
+    env = {"CLAUDE_PLUGIN_DATA": str(data_dir), "PATH": "/usr/bin:/bin"}
+    procs = [subprocess.Popen([sys.executable, str(SCRIPTS / "post_edit.py")], stdin=subprocess.PIPE,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True, env=env)
+             for _ in names]
+    for proc, n in zip(procs, names):
+        proc.stdin.write(json.dumps({"session_id": "par", "cwd": str(repo),
+                                     "tool_input": {"file_path": str(repo / n)}}))
+        proc.stdin.close()
+    for proc in procs:
+        proc.wait(timeout=60)
+    state = json.loads(next((data_dir).rglob("par.json")).read_text())
+    assert sorted(state["edited"]) == sorted(names) and len(state["edited_digest"]) == len(names)
+
+
 def test_invalid_no_checks_is_rejected(repo: Path, data_dir: Path) -> None:
     set_config(repo, verification={"enabled": True, "gates": [GATE_OK], "no_checks": "docs/**"})
     result = manual(repo, "src/pkg/mathx.py", data_dir=data_dir)

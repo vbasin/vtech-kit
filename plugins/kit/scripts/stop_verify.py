@@ -16,7 +16,7 @@ can't stand in for the edited source.
 With `verification.enabled`, the repo's gates check what they claim. A Python file no gate
 claims gets related tests the same way (when `tests.enabled`), so it is only a gap when no
 test reaches it. Files matched by `verification.no_checks` (documentation, data, images)
-have nothing executable to run and are not reported.
+have nothing executable to run and are not reported, with or without gates.
 
 Failures (lint findings, failing tests or gates, a missing interpreter) block the stop.
 Gaps (files no gate covers, tests capped or excluded, nothing selected) are reported to
@@ -359,7 +359,9 @@ def verify(root: Path, cfg: Dict[str, Any], changed: List[str],
         failures = [f for f in failures if not f.startswith(UNCOVERED)]
         test_targets = []
     else:
-        non_python = [f for f in changed if not f.endswith(".py")]
+        no_checks = cfg.get("verification", {}).get("no_checks") or []
+        non_python = [f for f in changed if not f.endswith(".py")
+                      and not any(fnmatch.fnmatchcase(f, p) for p in no_checks)]
         if non_python:
             gaps.append("No configured verification gates cover these non-Python files: "
                         + ", ".join(non_python))

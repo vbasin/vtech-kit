@@ -12,14 +12,13 @@ import sys
 from kit_common import (
     emit,
     load_config,
-    load_state,
     read_input,
     record_edit,
     relative_to_root,
     repo_root,
     resolve_python,
     run_lint,
-    save_state,
+    update_state,
 )
 
 
@@ -36,10 +35,8 @@ def main() -> int:
 
     session_id = str(data.get("session_id") or "")
     if session_id:
-        state = load_state(session_id)
-        record_edit(state, root, rel)
         try:
-            save_state(session_id, state)
+            update_state(session_id, lambda state: record_edit(state, root, rel))
         except OSError:
             pass  # the lint below still has to run
 

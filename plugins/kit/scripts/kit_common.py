@@ -21,6 +21,11 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
+try:  # POSIX only; elsewhere state updates are unserialised, as before
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
 CONFIG_RELPATH = Path(".claude") / "kit.json"
 STATE_TTL_S = 7 * 24 * 3600
 
@@ -243,9 +248,27 @@ def save_state(session_id: str, state: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def update_state(session_id: str, change: Callable[[Dict[str, Any]], None]) -> None:
+    """Read, change and write a session's state under an exclusive lock. Parallel tool calls
+    run several hooks of one session at once; without the lock the last writer won and the
+    others' records were lost."""
+    lock_path = _state_path(session_id).with_suffix(".lock")
+    with open(lock_path, "a", encoding="utf-8") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            state = load_state(session_id)
+            change(state)
+            save_state(session_id, state)
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def prune_old_state() -> None:
     cutoff = time.time() - STATE_TTL_S
-    for entry in state_dir().glob("*.json"):
+    # .tmp: a writer that crashed between write and replace; .lock: update_state's lock files.
+    for entry in [*state_dir().glob("*.json"), *state_dir().glob("*.tmp"), *state_dir().glob("*.lock")]:
         try:
             if entry.stat().st_mtime < cutoff:
                 entry.unlink()
@@ -326,13 +349,16 @@ def written_by_others(root: Path, session_id: str) -> Dict[str, Set[str]]:
     command, a generator) cannot be told from this session's own and stays in scope.
 
     Known gap: the other session is not checked for being alive. If it ended with its file
-    still failing, having said so at its own Stop, no later Stop of a session that never
-    edited the file picks it up. That matches a file already dirty at SessionStart, which
-    is not this session's either. Records expire with the state files (`STATE_TTL_S`).
+    still failing, having said so at its own Stop, or was interrupted or killed before any
+    Stop ran, no later Stop of a session that never edited the file picks it up. That matches
+    a file already dirty at SessionStart, which is not this session's either. Records expire
+    with the state files (`STATE_TTL_S`, counted from that session's last write).
+    Edits are matched by path relative to the checkout, so a session that edited a nested
+    checkout records paths relative to that one.
     """
-    own = _state_path(session_id)
     found: Dict[str, Set[str]] = {}
     try:
+        own = _state_path(session_id)
         entries = sorted(state_dir().glob("*.json"))
     except OSError:
         return found

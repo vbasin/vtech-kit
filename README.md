@@ -180,7 +180,8 @@ Files with nothing executable to check, such as documentation, data and images, 
 
 Patterns are case-sensitive `fnmatch` patterns, not gitignore globs: `*` also crosses `/`,
 so `*.md` matches `README.md` and `docs/a/b.md`, while `**/*.md` misses files at the root.
-A `.py` file matched by `no_checks` skips related tests but is still linted.
+A `.py` file matched by `no_checks` skips related tests but is still linted. `no_checks` also applies
+without gates, to the non-Python files an ungated repo would otherwise report.
 
 Commands run as argument arrays without a shell; `cwd` is optional and must remain within
 the repository. Python lint settings still apply. Gate coverage is a repo contract:
