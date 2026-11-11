@@ -7,6 +7,7 @@ running the tests (`pip install pytest ruff`).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -21,7 +22,8 @@ sys.path.insert(0, str(SCRIPTS))
 
 from bash_guard import check, is_full_suite  # noqa: E402
 from gates import run_gates  # noqa: E402
-from kit_common import changed_since, snapshot  # noqa: E402
+import kit_common  # noqa: E402
+from kit_common import changed_since, snapshot, written_by_others  # noqa: E402
 from stop_verify import find_tests  # noqa: E402
 
 PY_CANDIDATES = [".venv/bin/python"]
@@ -438,6 +440,110 @@ def test_preexisting_dirty_file_is_ignored(repo: Path, data_dir: Path) -> None:
     other = repo / "src" / "pkg" / "other.py"
     other.write_text("def other():\n    return 2\n")  # changed via Bash, not an Edit tool
     assert hook("stop_verify.py", {**base, "stop_hook_active": False}, data_dir) == {}
+
+
+def _session(repo: Path, data_dir: Path) -> dict:
+    base = {"session_id": str(uuid.uuid4()), "cwd": str(repo)}
+    hook("session_start.py", {**base, "source": "startup"}, data_dir)
+    return base
+
+
+def _tool_edit(base: dict, target: Path, text: str, data_dir: Path) -> None:
+    target.write_text(text)
+    hook("post_edit.py", {**base, "tool_name": "Edit", "tool_input": {"file_path": str(target)}}, data_dir)
+
+
+def _blocked(base: dict, data_dir: Path) -> bool:
+    return "hookSpecificOutput" in hook("stop_verify.py", {**base, "stop_hook_active": False}, data_dir)
+
+
+BROKEN = "def double(x):\n    return x * 3\n"
+
+
+def test_another_sessions_edit_is_left_to_that_session(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(theirs, target, BROKEN, data_dir)
+
+    assert not _blocked(mine, data_dir), "a session was held on a file only another session edited"
+    assert _blocked(theirs, data_dir), "the session that made the edit must still verify it"
+
+
+def test_a_change_no_session_recorded_after_anothers_edit_stays_in_scope(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(theirs, target, "def double(x):\n    return x * 2  # theirs\n", data_dir)
+    assert not _blocked(mine, data_dir)
+
+    recorded = target.stat()
+    target.write_text(BROKEN)  # written by a shell command: no session's edit tool saw it
+    os.utime(target, ns=(recorded.st_atime_ns, recorded.st_mtime_ns))  # even with the same timestamp
+    assert _blocked(mine, data_dir), "a write after the other session's edit could be this session's own"
+
+
+def test_anothers_edit_is_recognised_by_content_not_by_timestamp(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(theirs, target, BROKEN, data_dir)
+    recorded = target.stat()
+    os.utime(target, ns=(recorded.st_atime_ns, recorded.st_mtime_ns + 5_000_000_000))  # a checkout or stash rewrote it
+    assert not _blocked(mine, data_dir)
+
+
+def test_a_file_another_session_edited_and_someone_deleted_stays_in_scope(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(theirs, target, "def double(x):\n    return x * 2  # theirs\n", data_dir)
+    target.unlink()
+    assert _blocked(mine, data_dir), "a deletion cannot be attributed, and its tests must fail"
+
+
+def test_parallel_hooks_of_one_session_do_not_share_a_temp_file(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    replaced = []
+    monkeypatch.setattr(kit_common.os, "replace", lambda src, dst: replaced.append(Path(src).name))
+    monkeypatch.setattr(kit_common.os, "getpid", lambda: 111)
+    kit_common.save_state("s", {"edited": []})
+    monkeypatch.setattr(kit_common.os, "getpid", lambda: 222)
+    kit_common.save_state("s", {"edited": []})
+    assert len(set(replaced)) == 2, replaced
+    assert not list((data_dir / "state").glob("*.json")), "a temp file must never look like a session's state"
+
+
+def test_a_file_both_sessions_edited_is_still_checked(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(mine, target, "def double(x):\n    return x * 2  # mine\n", data_dir)
+    _tool_edit(theirs, target, BROKEN, data_dir)
+    assert _blocked(mine, data_dir), "this session edited the file too, so its content is still its concern"
+
+
+def test_another_sessions_committed_edit_is_left_to_that_session(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    _tool_edit(theirs, repo / "src" / "pkg" / "mathx.py", BROKEN, data_dir)
+    commit(repo, "the other session commits its work")
+    assert not _blocked(mine, data_dir)
+
+
+def test_only_sessions_in_the_same_checkout_are_consulted(repo: Path, data_dir: Path, tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(theirs, target, BROKEN, data_dir)
+    content = hashlib.sha256(target.read_bytes()).hexdigest()
+
+    state = data_dir / "state"
+    elsewhere = json.loads((state / f"{theirs['session_id']}.json").read_text())
+    elsewhere["baseline"]["root"] = str(tmp_path / "another-checkout")
+    elsewhere["edited_digest"] = {"src/pkg/other.py": "0" * 64}
+    (state / "elsewhere.json").write_text(json.dumps(elsewhere))
+    (state / "torn.json").write_text("{not json")
+    (state / "old-format.json").write_text(json.dumps({"baseline": {"root": str(repo)}, "edited": ["src/pkg/other.py"]}))
+    (state / "wrong-types.json").write_text(json.dumps({"baseline": {"root": str(repo)}, "edited_digest": {"x.py": 1, "y.py": True, "z.py": ""}}))
+
+    assert written_by_others(repo, mine["session_id"]) == {"src/pkg/mathx.py": {content}}
+    assert written_by_others(repo, theirs["session_id"]) == {}, "a session does not read its own record"
 
 
 def test_post_edit_reports_lint_errors(repo: Path, data_dir: Path) -> None:

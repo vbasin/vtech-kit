@@ -14,6 +14,7 @@ from kit_common import (
     load_config,
     load_state,
     read_input,
+    record_edit,
     relative_to_root,
     repo_root,
     resolve_python,
@@ -36,10 +37,11 @@ def main() -> int:
     session_id = str(data.get("session_id") or "")
     if session_id:
         state = load_state(session_id)
-        edited = state.setdefault("edited", [])
-        if rel not in edited:
-            edited.append(rel)
+        record_edit(state, root, rel)
+        try:
             save_state(session_id, state)
+        except OSError:
+            pass  # the lint below still has to run
 
     config = load_config(root)
     lint = config.get("lint", {})

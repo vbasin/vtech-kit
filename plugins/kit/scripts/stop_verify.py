@@ -2,7 +2,9 @@
 
 Runs only when the repo opts in through `.claude/kit.json` (`lint.enabled`, `tests.enabled`).
 Scope is the session's own changes: files edited through Claude's tools plus anything
-that changed on disk or in commits since SessionStart, deletions included. Tests are
+that changed on disk or in commits since SessionStart, deletions included. A file this
+session never edited, whose content is what another session's recorded edit in the same
+checkout left, is that session's to verify. Tests are
 picked per changed file: its own test file, `test_<module>*.py`, every test file whose
 imports reach it through the repo's own modules (so a test of B still runs when A, which B
 imports, changed), and for a `conftest.py` the test files beneath it. That set is capped at
@@ -58,6 +60,7 @@ from kit_common import (
     run_lint,
     save_state,
     tail,
+    written_by_others,
 )
 
 PYTEST_NO_TESTS = 5
@@ -409,7 +412,8 @@ def hook_main() -> int:
             or cfg.get("verification", {}).get("enabled")):
         return 0
     state = load_state(session_id)
-    changed = changed_since(root, state.get("baseline", {}), state.get("edited", []))
+    changed = changed_since(root, state.get("baseline", {}), state.get("edited", []),
+                            others=lambda: written_by_others(root, session_id))
     if not changed:
         return 0
     digest = verdict_digest(root, changed)

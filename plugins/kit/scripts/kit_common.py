@@ -19,7 +19,7 @@ import sys
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 CONFIG_RELPATH = Path(".claude") / "kit.json"
 STATE_TTL_S = 7 * 24 * 3600
@@ -234,7 +234,8 @@ def load_state(session_id: str) -> Dict[str, Any]:
 
 def save_state(session_id: str, state: Dict[str, Any]) -> None:
     path = _state_path(session_id)
-    tmp = path.with_suffix(".tmp")
+    # One temp file per writer: two hooks of one session can run at once (parallel tool calls).
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(state), encoding="utf-8")
     os.replace(tmp, path)
 
@@ -298,15 +299,72 @@ def snapshot(root: Path) -> Dict[str, Any]:
     return {"head": head, "dirty": dirty, "root": str(root)}
 
 
-def changed_since(root: Path, baseline: Dict[str, Any], edited: Iterable[str]) -> List[str]:
+def record_edit(state: Dict[str, Any], root: Path, rel: str) -> None:
+    """Remember a tool edit, and the content the file had right after it. That content is
+    how another session in the same checkout recognises the file as this session's
+    (`written_by_others`)."""
+    edited = state.setdefault("edited", [])
+    if rel not in edited:
+        edited.append(rel)
+    digest = file_digest(root / rel)
+    if digest is not None:
+        digests = state.get("edited_digest")
+        if not isinstance(digests, dict):
+            digests = state["edited_digest"] = {}
+        digests[rel] = digest
+
+
+def written_by_others(root: Path, session_id: str) -> Dict[str, Set[str]]:
+    """For each file another session edited in this checkout: the content it had right after
+    those edits. A file that still has that content was last written by that session, so
+    it is that session's to verify, not this one's.
+
+    Only tool edits are recorded. A change another session made any other way (a shell
+    command, a generator) cannot be told from this session's own and stays in scope.
+
+    Known gap: the other session is not checked for being alive. If it ended with its file
+    still failing, having said so at its own Stop, no later Stop of a session that never
+    edited the file picks it up. That matches a file already dirty at SessionStart, which
+    is not this session's either. Records expire with the state files (`STATE_TTL_S`).
+    """
+    own = _state_path(session_id)
+    found: Dict[str, Set[str]] = {}
+    try:
+        entries = sorted(state_dir().glob("*.json"))
+    except OSError:
+        return found
+    for entry in entries:
+        if entry == own:
+            continue
+        try:
+            other = json.loads(entry.read_text(encoding="utf-8"))
+            if other["baseline"]["root"] != str(root):
+                continue
+            digests = other["edited_digest"].items()
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+        for rel, digest in digests:
+            if isinstance(rel, str) and isinstance(digest, str) and digest:
+                found.setdefault(rel, set()).add(digest)
+    return found
+
+
+def changed_since(root: Path, baseline: Dict[str, Any], edited: Iterable[str],
+                  others: Optional[Callable[[], Dict[str, Set[str]]]] = None) -> List[str]:
     """Files changed during the session: tool edits, plus git changes since the baseline.
 
     Deleted files are included, since their tests still need to run. A file that was already
     dirty at the baseline counts only if its content has changed since, whether it was
     committed, edited further or restored.
+
+    `others` returns `written_by_others`. With it, a file this session never edited whose
+    content is what another session's edit left is not counted: several sessions can share
+    one checkout, and each verifies its own work. It is called at most once, and only when
+    a file needs it.
     """
     changed = set()
-    for rel in edited:
+    own = set(edited)
+    for rel in own:
         if (root / rel).is_file():
             changed.add(rel)
     if baseline:
@@ -323,8 +381,15 @@ def changed_since(root: Path, baseline: Dict[str, Any], edited: Iterable[str]) -
             if committed is None:
                 raise ValueError("Could not enumerate files committed since the session started")
             candidates.update(n for n in committed.split("\0") if n)
+        theirs: Optional[Dict[str, Set[str]]] = None
         for name in candidates:
-            if name not in before or before[name] != file_digest(root / name):
+            current = file_digest(root / name)
+            if name not in before or before[name] != current:
+                if others is not None and current is not None and name not in own:
+                    if theirs is None:
+                        theirs = others()
+                    if current in theirs.get(name, ()):
+                        continue
                 changed.add(name)
     return sorted(changed)
 
