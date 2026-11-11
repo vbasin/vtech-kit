@@ -13,6 +13,11 @@ explicit paths. `tests.scope: "all"` runs every discovered test file instead, fo
 whose whole suite is cheap. Each pytest run gets an empty bytecode cache, so a stale `.pyc`
 can't stand in for the edited source.
 
+With `verification.enabled`, the repo's gates check what they claim. A Python file no gate
+claims gets related tests the same way (when `tests.enabled`), so it is only a gap when no
+test reaches it. Files matched by `verification.no_checks` (documentation, data, images)
+have nothing executable to run and are not reported.
+
 Failures (lint findings, failing tests or gates, a missing interpreter) block the stop.
 Gaps (files no gate covers, tests capped or excluded, nothing selected) are reported to
 the user once per state of the diff and do not block: Claude cannot fix a gap by trying
@@ -43,7 +48,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from gates import run_gates
+from gates import UNCOVERED, run_gates, uncovered_by_gates
 from kit_common import (
     CONFIG_RELPATH,
     changed_since,
@@ -338,9 +343,16 @@ def verify(root: Path, cfg: Dict[str, Any], changed: List[str],
     gate_deadline = deadline - reserve if deadline is not None else None
     failures, _ = run_gates(root, cfg, changed, deadline=gate_deadline)
     gaps: List[str] = []
+    # Python files that only related tests can check: every changed one without gates, and
+    # in a gated repo the ones no gate claims (they used to be reported as a bare gap).
+    test_targets = changed_py
     if gated:
-        gaps = [f for f in failures if f.startswith("No configured gate covers")]
-        failures = [f for f in failures if f not in gaps]
+        failures = [f for f in failures if not f.startswith(UNCOVERED)]
+        uncovered = uncovered_by_gates(cfg, changed)
+        test_targets = [f for f in uncovered if f.endswith(".py")] if tcfg.get("enabled") else []
+        rest = [f for f in uncovered if f not in test_targets]
+        if rest:
+            gaps.append(UNCOVERED + ", ".join(rest))
     else:
         non_python = [f for f in changed if not f.endswith(".py")]
         if non_python:
@@ -350,7 +362,7 @@ def verify(root: Path, cfg: Dict[str, Any], changed: List[str],
         return failures, [], gaps
     python = resolve_python(cfg, root)
     if python is None:
-        if not (cfg.get("lint", {}).get("enabled") or (tcfg.get("enabled") and not gated)):
+        if not (cfg.get("lint", {}).get("enabled") or (tcfg.get("enabled") and test_targets)):
             return failures, [], gaps
         return failures + [f"No interpreter from `python` in .claude/kit.json exists here "
                 f"({cfg.get('python') or ['python3']}), "
@@ -359,9 +371,9 @@ def verify(root: Path, cfg: Dict[str, Any], changed: List[str],
     lint_out = lint_files(root, python, cfg, [f for f in changed_py if (root / f).is_file()], deadline=deadline)
     if lint_out:
         failures.append(f"Lint ({' '.join(cfg['lint'].get('args', []))}):\n{lint_out}")
-    if gated or not tcfg.get("enabled"):
+    if not tcfg.get("enabled") or not test_targets:
         return failures, [], gaps
-    tests, capped, excluded_count, untested = select_tests(root, changed_py, tcfg)
+    tests, capped, excluded_count, untested = select_tests(root, test_targets, tcfg)
     if untested:
         gaps.append(INCOMPLETE + "no test reaches " + ", ".join(untested))
     if capped:

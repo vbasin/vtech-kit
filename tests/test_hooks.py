@@ -871,6 +871,60 @@ def test_language_neutral_gate_pass_fail_and_uncovered(repo: Path, data_dir: Pat
     assert result.returncode == 1 and "No configured gate covers" in result.stdout
 
 
+GATE_OK = {"name": "ts", "paths": ["src/*.ts"], "argv": [sys.executable, "-c", "import sys; sys.exit(0)"]}
+
+
+def test_gated_repo_tests_a_python_file_no_gate_claims(repo: Path, data_dir: Path) -> None:
+    # Gates and related tests together: a .py no gate claims runs its related tests instead of
+    # being reported as a bare gap (the gap fired on every session in a partly gated repo).
+    (repo / "src/app.ts").write_text("x\n")
+    set_config(repo, verification={"enabled": True, "gates": [GATE_OK]})
+    result = manual(repo, "src/app.ts", "src/pkg/mathx.py", data_dir=data_dir)
+    assert result.returncode == 0, result.stdout
+    assert "tests/test_mathx.py" in result.stdout and "No configured gate covers" not in result.stdout
+    (repo / "src/pkg/mathx.py").write_text("def double(x):\n    return x * 3\n")
+    result = manual(repo, "src/pkg/mathx.py", data_dir=data_dir)
+    assert result.returncode == 1 and "kit verify: FAILED" in result.stdout
+    result = manual(repo, "tests/test_unrelated.py", data_dir=data_dir)      # a changed test runs itself
+    assert result.returncode == 0 and "tests/test_unrelated.py" in result.stdout
+
+
+def test_gated_repo_python_file_no_test_reaches_is_still_a_gap(repo: Path, data_dir: Path) -> None:
+    set_config(repo, verification={"enabled": True, "gates": [GATE_OK]})
+    result = manual(repo, "src/pkg/other.py", data_dir=data_dir)
+    assert result.returncode == 1 and "no test reaches src/pkg/other.py" in result.stdout
+    set_config(repo, tests={"enabled": False})                                  # no tests: a plain gap
+    result = manual(repo, "src/pkg/mathx.py", data_dir=data_dir)
+    assert result.returncode == 1 and "No configured gate covers: src/pkg/mathx.py" in result.stdout
+
+
+def test_no_checks_files_are_not_gaps(repo: Path, data_dir: Path) -> None:
+    (repo / "src/app.ts").write_text("x\n")
+    (repo / "docs").mkdir()
+    (repo / "docs/note.md").write_text("n\n")
+    set_config(repo, verification={"enabled": True, "gates": [GATE_OK], "no_checks": ["docs/**", "*.md"]})
+    result = manual(repo, "src/app.ts", "docs/note.md", "README.md", data_dir=data_dir)
+    assert result.returncode == 0, result.stdout
+    (repo / "data.csv").write_text("a\n")
+    result = manual(repo, "data.csv", data_dir=data_dir)                        # not declared: still a gap
+    assert result.returncode == 1 and "No configured gate covers: data.csv" in result.stdout
+
+
+def test_invalid_no_checks_is_rejected(repo: Path, data_dir: Path) -> None:
+    set_config(repo, verification={"enabled": True, "gates": [GATE_OK], "no_checks": "docs/**"})
+    result = manual(repo, "src/pkg/mathx.py", data_dir=data_dir)
+    assert result.returncode == 2 and "no_checks must be a list of strings" in result.stdout
+
+
+def test_stop_is_silent_for_a_gated_repo_change_its_tests_verify(repo: Path, data_dir: Path) -> None:
+    set_config(repo, verification={"enabled": True, "gates": [GATE_OK], "no_checks": ["*.md"]})
+    base = {"session_id": "gated-related", "cwd": str(repo)}
+    hook("session_start.py", base, data_dir)
+    (repo / "src/pkg/mathx.py").write_text("def double(x):\n    return x + x\n")
+    (repo / "NOTES.md").write_text("why\n")
+    assert hook("stop_verify.py", base, data_dir) == {}
+
+
 def test_gate_command_does_not_use_shell_and_cannot_escape_repo(repo: Path, data_dir: Path) -> None:
     (repo / "src/app.ts").write_text("x\n")
     set_config(repo, lint={"enabled": False}, tests={"enabled": False}, verification={

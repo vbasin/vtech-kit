@@ -10,6 +10,30 @@ from typing import Any, Dict, List, Optional, Tuple
 from kit_common import run, tail
 
 
+UNCOVERED = "No configured gate covers: "
+
+
+def gate_paths(config: Dict[str, Any]) -> List[str]:
+    """Every path pattern a well-formed gate declares."""
+    gates = config.get("verification", {}).get("gates")
+    out: List[str] = []
+    for gate in gates if isinstance(gates, list) else []:
+        paths = gate.get("paths") if isinstance(gate, dict) else None
+        if isinstance(paths, list):
+            out.extend(p for p in paths if isinstance(p, str) and p)
+    return out
+
+
+def uncovered_by_gates(config: Dict[str, Any], changed: List[str]) -> List[str]:
+    """Changed files no gate claims, minus those the repo declares have no checks to run
+    (`verification.no_checks`: documentation, data, images)."""
+    patterns = gate_paths(config)
+    no_checks = config.get("verification", {}).get("no_checks") or []
+    return sorted(f for f in changed
+                  if not any(fnmatch.fnmatchcase(f, p) for p in patterns)
+                  and not any(fnmatch.fnmatchcase(f, p) for p in no_checks))
+
+
 def run_gates(root: Path, config: Dict[str, Any], changed: List[str],
               deadline: Optional[float] = None) -> Tuple[List[str], List[str]]:
     profile = config.get("verification", {})
@@ -58,7 +82,7 @@ def run_gates(root: Path, config: Dict[str, Any], changed: List[str],
                 failures.append(f"Gate {name} failed (exit {result.returncode}):\n{output}")
         except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
             failures.append(f"Gate {name} unavailable: {exc}")
-    uncovered = sorted(set(changed) - covered)
+    uncovered = [f for f in uncovered_by_gates(config, changed) if f not in covered]
     if uncovered:
-        failures.append("No configured gate covers: " + ", ".join(uncovered))
+        failures.append(UNCOVERED + ", ".join(uncovered))
     return failures, ran

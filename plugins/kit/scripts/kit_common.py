@@ -144,6 +144,9 @@ def validate_verification_config(cfg: Dict[str, Any]) -> None:
             raise ValueError(f"Invalid kit configuration: {section}.enabled must be a boolean")
     if not isinstance(cfg.get("verification", {}).get("enabled", False), bool):
         raise ValueError("Invalid kit configuration: verification.enabled must be a boolean")
+    no_checks = cfg.get("verification", {}).get("no_checks")
+    if no_checks is not None and not strings(no_checks):
+        raise ValueError("Invalid kit configuration: verification.no_checks must be a list of strings")
     for section, keys in (("lint", ("args",)),
                           ("tests", ("test_dirs", "import_roots", "exclude", "pytest_args"))):
         for key in keys:

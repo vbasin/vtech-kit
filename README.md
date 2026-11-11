@@ -168,9 +168,18 @@ For projects with a trusted, scoped test target, enable `verification` in `.clau
 }
 ```
 
-Every changed path must match a gate. Commands run as argument arrays without a shell;
-`cwd` is optional and must remain within the repository. Gates replace automatic pytest
-selection when enabled; Python lint settings still apply. Gate coverage is a repo contract:
+Every changed path must be checked by something, or the run is reported as incomplete.
+A path a gate claims runs that gate. A Python file no gate claims runs its related tests,
+as without gates (when `tests.enabled`), so it is a gap only when no test reaches it.
+Files with nothing executable to check, such as documentation, data and images, go in
+`verification.no_checks` (a list of globs) and are not reported:
+
+```json
+"no_checks": ["docs/**", "**/*.md", "data/**", "**/*.png"]
+```
+
+Commands run as argument arrays without a shell; `cwd` is optional and must remain within
+the repository. Python lint settings still apply. Gate coverage is a repo contract:
 include affected integration tests and shared configuration paths. Test commands execute
 with the user's privileges. The manual verifier and Stop hook use the same gate runner.
 
