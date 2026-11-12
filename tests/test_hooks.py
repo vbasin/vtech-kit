@@ -947,6 +947,51 @@ def test_parallel_edit_hooks_keep_every_record(repo: Path, data_dir: Path) -> No
     assert sorted(state["edited"]) == sorted(names) and len(state["edited_digest"]) == len(names)
 
 
+def test_state_update_without_flock_support_still_records(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Some NFS/FUSE mounts refuse flock; the edit must still be recorded, just unserialised.
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+
+    class NoFlock:
+        LOCK_EX, LOCK_UN = 2, 8
+
+        @staticmethod
+        def flock(fd: int, op: int) -> None:
+            raise OSError(37, "No locks available")
+
+    monkeypatch.setattr(kit_common, "fcntl", NoFlock)
+    kit_common.update_state("nolock", lambda st: st.setdefault("edited", []).append("a.py"))
+    assert kit_common.load_state("nolock")["edited"] == ["a.py"]
+
+
+def test_prune_keeps_a_live_sessions_lock(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A lock's mtime never moves; unlinking a live session's lock would split its writers.
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    kit_common.update_state("live", lambda st: st.update(edited=[]))
+    state = data_dir / "state"
+    orphan = state / "gone.lock"
+    orphan.write_text("")
+    old = kit_common.time.time() - kit_common.STATE_TTL_S - 60
+    for lock in (state / "live.lock", orphan):
+        os.utime(lock, (old, old))
+    kit_common.prune_old_state()
+    assert (state / "live.lock").exists() and (state / "live.json").exists()
+    assert not orphan.exists()
+
+
+def test_stop_verdict_keeps_edits_recorded_during_verify(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Stop reads state, verifies for minutes, then records a verdict. Edits post_edit recorded
+    # meanwhile must survive, and only the verdict keys may change.
+    import stop_verify
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    kit_common.save_state("v", {"edited": ["a.py"], "failed_digest": "old"})
+    stale = kit_common.load_state("v")
+    kit_common.update_state("v", lambda st: st["edited"].append("b.py"))
+    stop_verify._record_verdict("v", passed_digest="d1", failed_digest=None)
+    state = kit_common.load_state("v")
+    assert state["edited"] == ["a.py", "b.py"] and state["passed_digest"] == "d1"
+    assert "failed_digest" not in state and stale["edited"] == ["a.py"]
+
+
 def test_invalid_no_checks_is_rejected(repo: Path, data_dir: Path) -> None:
     set_config(repo, verification={"enabled": True, "gates": [GATE_OK], "no_checks": "docs/**"})
     result = manual(repo, "src/pkg/mathx.py", data_dir=data_dir)

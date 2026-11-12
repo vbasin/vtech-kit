@@ -254,24 +254,37 @@ def update_state(session_id: str, change: Callable[[Dict[str, Any]], None]) -> N
     others' records were lost."""
     lock_path = _state_path(session_id).with_suffix(".lock")
     with open(lock_path, "a", encoding="utf-8") as lock:
+        locked = False
         if fcntl is not None:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                locked = True
+            except OSError:
+                pass  # a filesystem without flock: update unserialised, as without fcntl
         try:
             state = load_state(session_id)
             change(state)
             save_state(session_id, state)
         finally:
-            if fcntl is not None:
+            if locked:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def prune_old_state() -> None:
     cutoff = time.time() - STATE_TTL_S
-    # .tmp: a writer that crashed between write and replace; .lock: update_state's lock files.
-    for entry in [*state_dir().glob("*.json"), *state_dir().glob("*.tmp"), *state_dir().glob("*.lock")]:
+    # .tmp: a writer that crashed between write and replace. A .lock's mtime never moves, so
+    # it goes only with its session's state: unlinking a live session's lock would let two
+    # writers each hold a lock on a different file.
+    for entry in [*state_dir().glob("*.json"), *state_dir().glob("*.tmp")]:
         try:
             if entry.stat().st_mtime < cutoff:
                 entry.unlink()
+        except OSError:
+            pass
+    for lock in state_dir().glob("*.lock"):
+        try:
+            if not lock.with_suffix(".json").exists() and lock.stat().st_mtime < cutoff:
+                lock.unlink()
         except OSError:
             pass
 

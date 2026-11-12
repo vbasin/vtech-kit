@@ -63,8 +63,8 @@ from kit_common import (
     resolve_python,
     run,
     run_lint,
-    save_state,
     tail,
+    update_state,
     written_by_others,
 )
 
@@ -410,6 +410,22 @@ def verdict_digest(root: Path, files: List[str]) -> str:
     return h.hexdigest()
 
 
+def _record_verdict(session_id: str, **digests: Optional[str]) -> None:
+    """Write only the verdict keys, under the state lock. verify() can run for minutes, and
+    the state read before it is stale by then: saving that whole dict would drop the edits
+    post_edit recorded meanwhile. A None value removes the key."""
+    def change(state: Dict[str, Any]) -> None:
+        for key, value in digests.items():
+            if value is None:
+                state.pop(key, None)
+            else:
+                state[key] = value
+    try:
+        update_state(session_id, change)
+    except OSError:
+        pass
+
+
 def hook_main() -> int:
     # The configured hook limit is 480 seconds; leave time for setup and reporting.
     deadline = time.monotonic() + 450
@@ -443,23 +459,19 @@ def hook_main() -> int:
 
     failures, _, gaps = verify(root, cfg, changed, deadline=deadline)
     if not failures:
-        state.pop("failed_digest", None)
         if gaps:
-            state["gaps_digest"] = digest
-            save_state(session_id, state)
+            _record_verdict(session_id, gaps_digest=digest, failed_digest=None)
             emit({"systemMessage": "kit verify: nothing failed, but verification is INCOMPLETE. "
                   "Do not report this change as verified.\n" + "\n".join(gaps)})
             return 0
-        state["passed_digest"] = digest
-        save_state(session_id, state)
+        _record_verdict(session_id, passed_digest=digest, failed_digest=None)
         return 0
 
     if data.get("stop_hook_active") and state.get("failed_digest") == digest:
         emit({"systemMessage": "kit verify: still failing after one retry; letting Claude stop. "
               "Verification FAILED or INCOMPLETE. Report this explicitly; do not claim the task is verified."})
         return 0
-    state["failed_digest"] = digest
-    save_state(session_id, state)
+    _record_verdict(session_id, failed_digest=digest)
     note = ("\n\nAlso not covered, and not something to fix now:\n" + "\n".join(gaps)) if gaps else ""
     # additionalContext keeps Claude going like decision=block, but reads as feedback, not a hook error.
     emit({"hookSpecificOutput": {
