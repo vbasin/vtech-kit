@@ -980,21 +980,25 @@ def test_prune_keeps_a_live_sessions_lock(data_dir: Path, monkeypatch: pytest.Mo
     assert not stale.exists()
 
 
-def test_stop_lets_claude_stop_when_a_failure_cannot_be_recorded(
-        repo: Path, data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Without a saved failed_digest the retry guard never matches; blocking would repeat forever.
+@pytest.mark.parametrize("retry", [False, True])
+def test_stop_retries_once_when_a_failure_cannot_be_recorded(
+        repo: Path, data_dir: Path, monkeypatch: pytest.MonkeyPatch, retry: bool) -> None:
+    # Without a saved failed_digest the retry guard never matches. Claude still gets the first
+    # chance to fix it; on the retry Stop lets it stop instead of blocking every turn.
     import stop_verify
     monkeypatch.setattr(stop_verify, "_record_verdict", lambda *a, **k: False)
-    monkeypatch.setattr(stop_verify, "verify", lambda *a, **k: (["tests failed"], [], []))
+    monkeypatch.setattr(stop_verify, "verify", lambda *a, **k: (["tests failed"], [], ["a gap"]))
     monkeypatch.setattr(stop_verify, "changed_since", lambda *a, **k: ["src/pkg/mathx.py"])
     monkeypatch.setattr(stop_verify, "load_config", lambda *a, **k: {"lint": {"enabled": True}})
-    monkeypatch.setattr(stop_verify, "read_input", lambda: {"session_id": "nostate", "cwd": str(repo)})
+    monkeypatch.setattr(stop_verify, "read_input",
+                        lambda: {"session_id": "nostate", "cwd": str(repo), "stop_hook_active": retry})
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
     out = []
     monkeypatch.setattr(stop_verify, "emit", out.append)
-    assert stop_verify.hook_main() == 0
-    assert len(out) == 1 and "hookSpecificOutput" not in out[0], out
-    assert "FAILED" in out[0]["systemMessage"] and "tests failed" in out[0]["systemMessage"]
+    assert stop_verify.hook_main() == 0 and len(out) == 1, out
+    text = out[0]["systemMessage"] if retry else out[0]["hookSpecificOutput"]["additionalContext"]
+    assert "tests failed" in text and "a gap" in text
+    assert ("FAILED" in text) if retry else ("hookSpecificOutput" in out[0])
 
 
 def test_stop_verdict_keeps_edits_recorded_during_verify(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:

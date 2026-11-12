@@ -472,14 +472,15 @@ def hook_main() -> int:
         emit({"systemMessage": "kit verify: still failing after one retry; letting Claude stop. "
               "Verification FAILED or INCOMPLETE. Report this explicitly; do not claim the task is verified."})
         return 0
-    if not _record_verdict(session_id, failed_digest=digest):
-        # The retry guard above needs failed_digest. Without it, blocking would repeat every
-        # turn, so report the failure once and let Claude stop.
-        emit({"systemMessage": "kit verify: verification FAILED and its state could not be saved; "
-              "letting Claude stop. Report this explicitly; do not claim the task is verified.\n\n"
-              + "\n\n".join(failures)})
-        return 0
+    recorded = _record_verdict(session_id, failed_digest=digest)
     note = ("\n\nAlso not covered, and not something to fix now:\n" + "\n".join(gaps)) if gaps else ""
+    if not recorded and data.get("stop_hook_active"):
+        # The retry guard above needs the saved failed_digest. Without it, blocking would
+        # repeat every turn, so after the one retry report the failure and let Claude stop.
+        emit({"systemMessage": "kit verify: still failing after one retry (its state could not be "
+              "saved); letting Claude stop. Verification FAILED. Report this explicitly; do not "
+              "claim the task is verified.\n\n" + "\n\n".join(failures) + note})
+        return 0
     # additionalContext keeps Claude going like decision=block, but reads as feedback, not a hook error.
     emit({"hookSpecificOutput": {
         "hookEventName": "Stop",

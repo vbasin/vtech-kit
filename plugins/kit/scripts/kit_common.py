@@ -263,8 +263,12 @@ def update_state(session_id: str, change: Callable[[Dict[str, Any]], None]) -> N
                 pass  # a filesystem without flock: update unserialised, as without fcntl
         try:
             # Opening for append never moves mtime; touch it so it marks the last update and
-            # prune_old_state can age locks like the state they guard.
-            os.utime(lock_path)
+            # prune_old_state can age locks like the state they guard. Only a TTL hint: a
+            # failed touch must not cost the update.
+            try:
+                os.utime(lock.fileno() if os.utime in os.supports_fd else lock_path)
+            except (OSError, NotImplementedError):
+                pass
             state = load_state(session_id)
             change(state)
             save_state(session_id, state)
