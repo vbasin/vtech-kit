@@ -422,8 +422,12 @@ def test_stop_blocks_once_then_lets_go(repo: Path, data_dir: Path) -> None:
         "hookSpecificOutput"], "a new turn on the same failing diff still blocks once"
 
 
+    state_file = next(data_dir.rglob(f"{sid}.json"))
+    before = json.loads(state_file.read_text())
     again = hook("stop_verify.py", {**base, "stop_hook_active": True}, data_dir)
     assert "hookSpecificOutput" not in again and "still failing" in again["systemMessage"]
+    assert "assert 6 == 4" in again["systemMessage"], "the final message carries the failure"
+    assert json.loads(state_file.read_text()) == before, "a retry that ends records nothing"
 
     target.write_text("def double(x):\n    return x * 2\n")
     assert hook("stop_verify.py", {**base, "stop_hook_active": True}, data_dir) == {}
