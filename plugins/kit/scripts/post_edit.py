@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from contextlib import suppress
 
 from kit_common import (
     emit,
@@ -35,10 +36,8 @@ def main() -> int:
 
     session_id = str(data.get("session_id") or "")
     if session_id:
-        try:
+        with suppress(OSError):  # the lint below still has to run
             update_state(session_id, lambda state: record_edit(state, root, rel))
-        except OSError:
-            pass  # the lint below still has to run
 
     config = load_config(root)
     lint = config.get("lint", {})

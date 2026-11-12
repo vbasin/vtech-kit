@@ -20,9 +20,9 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "kit" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import kit_common  # noqa: E402
 from bash_guard import check, is_full_suite  # noqa: E402
 from gates import run_gates  # noqa: E402
-import kit_common  # noqa: E402
 from kit_common import changed_since, snapshot, written_by_others  # noqa: E402
 from stop_verify import find_tests  # noqa: E402
 
@@ -502,7 +502,8 @@ def test_a_file_another_session_edited_and_someone_deleted_stays_in_scope(repo: 
     assert _blocked(mine, data_dir), "a deletion cannot be attributed, and its tests must fail"
 
 
-def test_parallel_hooks_of_one_session_do_not_share_a_temp_file(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_parallel_hooks_of_one_session_do_not_share_a_temp_file(
+        data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
     replaced = []
     monkeypatch.setattr(kit_common.os, "replace", lambda src, dst: replaced.append(Path(src).name))
@@ -543,8 +544,10 @@ def test_only_sessions_in_the_same_checkout_are_consulted(repo: Path, data_dir: 
     elsewhere["edited_digest"] = {"src/pkg/other.py": "0" * 64}
     (state / "elsewhere.json").write_text(json.dumps(elsewhere))
     (state / "torn.json").write_text("{not json")
-    (state / "old-format.json").write_text(json.dumps({"baseline": {"root": str(repo)}, "edited": ["src/pkg/other.py"]}))
-    (state / "wrong-types.json").write_text(json.dumps({"baseline": {"root": str(repo)}, "edited_digest": {"x.py": 1, "y.py": True, "z.py": ""}}))
+    (state / "old-format.json").write_text(
+        json.dumps({"baseline": {"root": str(repo)}, "edited": ["src/pkg/other.py"]}))
+    (state / "wrong-types.json").write_text(json.dumps(
+        {"baseline": {"root": str(repo)}, "edited_digest": {"x.py": 1, "y.py": True, "z.py": ""}}))
 
     assert written_by_others(repo, mine["session_id"]) == {"src/pkg/mathx.py": {content}}
     assert written_by_others(repo, theirs["session_id"]) == {}, "a session does not read its own record"

@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from kit_common import run, tail
 
-
 UNCOVERED = "No configured gate covers: "
 
 
