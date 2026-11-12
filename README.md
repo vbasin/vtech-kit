@@ -84,7 +84,7 @@ A repo points `deliver` at its own gates and reviewers in `.claude/kit.json`:
 | PostToolUse (Edit/Write) | `post_edit.py` | Remembers the edited file and lints it at once |
 | SubagentStart/Stop (`kit:reviewer`) | `review_gate.py` | Stamps the working tree a `kit:reviewer` run started on as reviewed, if the tree is unchanged when it finishes |
 | PreToolUse (Bash, `*create_pull_request`) | `review_gate.py` | Denies opening a PR (an MCP `create_pull_request` tool or `gh pr create`) from a tree no reviewer stamped, and pushing to a branch that already has a PR. `review.gate` in `.claude/kit.json`: `once` (default) reminds once per tree, then lets the retry through; `deny` holds until it is reviewed; `off`. Claude Code only, since Codex and Grok have no subagent events |
-| Stop | `stop_verify.py` | Lints the session's changed `.py` files and runs the tests related to them, as explicit paths: their own test files and every test whose imports reach them, nearest first, up to `tests.max_files`. On failure it sends the output back so Claude keeps working. Gaps it cannot close (files no gate covers, tests left out by the cap) are shown to you once and do not block. A diff that already passed is not re-run on the next turn. If Claude stops again with the same failure, it lets the stop through with a notice, so a pre-existing failure can't trap a session |
+| Stop | `stop_verify.py` | Lints the session's changed `.py` files and runs the tests related to them, as explicit paths: their own test files and every test whose imports reach them, nearest first, up to `tests.max_files`. On failure it sends the output back so Claude keeps working. Gaps it cannot close (files no gate covers, tests left out by the cap) are shown to you once and do not block. A diff that already passed is not re-run on the next turn. If Claude stops again with the same failure, it lets the stop through with a notice, so a pre-existing failure can't trap a session. A file this session never edited, whose content is what another session's edit in the same checkout left, is that session's to verify |
 | Stop | `learning_report.py stop` | Records the skills, agents, MCP servers and development tools this turn added, with what each is for and the decision log written for it. Once per new skill or agent, it asks Claude why it was needed and to commit it, and it asks Claude to move a skill or agent saved only under `~/.claude` into the repo. Then it sends the repo's queue when both the machine and the repo opt in (see below). A cloud container can be discarded without a SessionEnd, so this is where a cloud session reports |
 | SessionEnd | `learning_report.py` | The same capture and send, for anything the last turn left |
 
@@ -168,9 +168,23 @@ For projects with a trusted, scoped test target, enable `verification` in `.clau
 }
 ```
 
-Every changed path must match a gate. Commands run as argument arrays without a shell;
-`cwd` is optional and must remain within the repository. Gates replace automatic pytest
-selection when enabled; Python lint settings still apply. Gate coverage is a repo contract:
+Every changed path must be checked by something, or the run is reported as incomplete.
+A path a gate claims runs that gate. A Python file no gate claims runs its related tests,
+as without gates (when `tests.enabled`), so it is a gap only when no test reaches it.
+Files with nothing executable to check, such as documentation, data and images, go in
+`verification.no_checks` (a list of globs) and are not reported:
+
+```json
+"no_checks": ["docs/**", "*.md", "data/**", "*.png"]
+```
+
+Patterns are case-sensitive `fnmatch` patterns, not gitignore globs: `*` also crosses `/`,
+so `*.md` matches `README.md` and `docs/a/b.md`, while `**/*.md` misses files at the root.
+A `.py` file matched by `no_checks` skips related tests but is still linted. `no_checks` also applies
+without gates, to the non-Python files an ungated repo would otherwise report.
+
+Commands run as argument arrays without a shell; `cwd` is optional and must remain within
+the repository. Python lint settings still apply. Gate coverage is a repo contract:
 include affected integration tests and shared configuration paths. Test commands execute
 with the user's privileges. The manual verifier and Stop hook use the same gate runner.
 

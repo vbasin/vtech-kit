@@ -19,7 +19,12 @@ import sys
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
+
+try:  # POSIX only; elsewhere state updates are unserialised, as before
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 CONFIG_RELPATH = Path(".claude") / "kit.json"
 STATE_TTL_S = 7 * 24 * 3600
@@ -144,6 +149,9 @@ def validate_verification_config(cfg: Dict[str, Any]) -> None:
             raise ValueError(f"Invalid kit configuration: {section}.enabled must be a boolean")
     if not isinstance(cfg.get("verification", {}).get("enabled", False), bool):
         raise ValueError("Invalid kit configuration: verification.enabled must be a boolean")
+    no_checks = cfg.get("verification", {}).get("no_checks")
+    if no_checks is not None and not strings(no_checks):
+        raise ValueError("Invalid kit configuration: verification.no_checks must be a list of strings")
     for section, keys in (("lint", ("args",)),
                           ("tests", ("test_dirs", "import_roots", "exclude", "pytest_args"))):
         for key in keys:
@@ -234,14 +242,44 @@ def load_state(session_id: str) -> Dict[str, Any]:
 
 def save_state(session_id: str, state: Dict[str, Any]) -> None:
     path = _state_path(session_id)
-    tmp = path.with_suffix(".tmp")
+    # One temp file per writer: two hooks of one session can run at once (parallel tool calls).
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(state), encoding="utf-8")
     os.replace(tmp, path)
 
 
+def update_state(session_id: str, change: Callable[[Dict[str, Any]], None]) -> None:
+    """Read, change and write a session's state under an exclusive lock. Parallel tool calls
+    run several hooks of one session at once; without the lock the last writer won and the
+    others' records were lost."""
+    lock_path = _state_path(session_id).with_suffix(".lock")
+    with open(lock_path, "a", encoding="utf-8") as lock:
+        locked = False
+        if fcntl is not None:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                locked = True
+            except OSError:
+                pass  # a filesystem without flock: update unserialised, as without fcntl
+        try:
+            # Opening for append never moves mtime; touch it so it marks the last update and
+            # prune_old_state can age locks like the state they guard. Only a TTL hint: a
+            # failed touch must not cost the update.
+            with suppress(OSError, NotImplementedError):
+                os.utime(lock.fileno() if os.utime in os.supports_fd else lock_path)
+            state = load_state(session_id)
+            change(state)
+            save_state(session_id, state)
+        finally:
+            if locked:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def prune_old_state() -> None:
     cutoff = time.time() - STATE_TTL_S
-    for entry in state_dir().glob("*.json"):
+    # .tmp: a writer that crashed between write and replace; .lock: update_state's lock
+    # files, whose mtime update_state refreshes on every update.
+    for entry in [*state_dir().glob("*.json"), *state_dir().glob("*.tmp"), *state_dir().glob("*.lock")]:
         try:
             if entry.stat().st_mtime < cutoff:
                 entry.unlink()
@@ -298,15 +336,75 @@ def snapshot(root: Path) -> Dict[str, Any]:
     return {"head": head, "dirty": dirty, "root": str(root)}
 
 
-def changed_since(root: Path, baseline: Dict[str, Any], edited: Iterable[str]) -> List[str]:
+def record_edit(state: Dict[str, Any], root: Path, rel: str) -> None:
+    """Remember a tool edit, and the content the file had right after it. That content is
+    how another session in the same checkout recognises the file as this session's
+    (`written_by_others`)."""
+    edited = state.setdefault("edited", [])
+    if rel not in edited:
+        edited.append(rel)
+    digest = file_digest(root / rel)
+    if digest is not None:
+        digests = state.get("edited_digest")
+        if not isinstance(digests, dict):
+            digests = state["edited_digest"] = {}
+        digests[rel] = digest
+
+
+def written_by_others(root: Path, session_id: str) -> Dict[str, Set[str]]:
+    """For each file another session edited in this checkout: the content it had right after
+    those edits. A file that still has that content was last written by that session, so
+    it is that session's to verify, not this one's.
+
+    Only tool edits are recorded. A change another session made any other way (a shell
+    command, a generator) cannot be told from this session's own and stays in scope.
+
+    Known gap: the other session is not checked for being alive. If it ended with its file
+    still failing, having said so at its own Stop, or was interrupted or killed before any
+    Stop ran, no later Stop of a session that never edited the file picks it up. That matches
+    a file already dirty at SessionStart, which is not this session's either. Records expire
+    with the state files (`STATE_TTL_S`, counted from that session's last write).
+    Edits are matched by path relative to the checkout, so a session that edited a nested
+    checkout records paths relative to that one.
+    """
+    found: Dict[str, Set[str]] = {}
+    try:
+        own = _state_path(session_id)
+        entries = sorted(state_dir().glob("*.json"))
+    except OSError:
+        return found
+    for entry in entries:
+        if entry == own:
+            continue
+        try:
+            other = json.loads(entry.read_text(encoding="utf-8"))
+            if other["baseline"]["root"] != str(root):
+                continue
+            digests = other["edited_digest"].items()
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+        for rel, digest in digests:
+            if isinstance(rel, str) and isinstance(digest, str) and digest:
+                found.setdefault(rel, set()).add(digest)
+    return found
+
+
+def changed_since(root: Path, baseline: Dict[str, Any], edited: Iterable[str],
+                  others: Optional[Callable[[], Dict[str, Set[str]]]] = None) -> List[str]:
     """Files changed during the session: tool edits, plus git changes since the baseline.
 
     Deleted files are included, since their tests still need to run. A file that was already
     dirty at the baseline counts only if its content has changed since, whether it was
     committed, edited further or restored.
+
+    `others` returns `written_by_others`. With it, a file this session never edited whose
+    content is what another session's edit left is not counted: several sessions can share
+    one checkout, and each verifies its own work. It is called at most once, and only when
+    a file needs it.
     """
     changed = set()
-    for rel in edited:
+    own = set(edited)
+    for rel in own:
         if (root / rel).is_file():
             changed.add(rel)
     if baseline:
@@ -323,8 +421,15 @@ def changed_since(root: Path, baseline: Dict[str, Any], edited: Iterable[str]) -
             if committed is None:
                 raise ValueError("Could not enumerate files committed since the session started")
             candidates.update(n for n in committed.split("\0") if n)
+        theirs: Optional[Dict[str, Set[str]]] = None
         for name in candidates:
-            if name not in before or before[name] != file_digest(root / name):
+            current = file_digest(root / name)
+            if name not in before or before[name] != current:
+                if others is not None and current is not None and name not in own:
+                    if theirs is None:
+                        theirs = others()
+                    if current in theirs.get(name, ()):
+                        continue
                 changed.add(name)
     return sorted(changed)
 

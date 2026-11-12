@@ -8,17 +8,18 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from contextlib import suppress
 
 from kit_common import (
     emit,
     load_config,
-    load_state,
     read_input,
+    record_edit,
     relative_to_root,
     repo_root,
     resolve_python,
     run_lint,
-    save_state,
+    update_state,
 )
 
 
@@ -35,11 +36,8 @@ def main() -> int:
 
     session_id = str(data.get("session_id") or "")
     if session_id:
-        state = load_state(session_id)
-        edited = state.setdefault("edited", [])
-        if rel not in edited:
-            edited.append(rel)
-            save_state(session_id, state)
+        with suppress(OSError):  # the lint below still has to run
+            update_state(session_id, lambda state: record_edit(state, root, rel))
 
     config = load_config(root)
     lint = config.get("lint", {})

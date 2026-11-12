@@ -2,7 +2,9 @@
 
 Runs only when the repo opts in through `.claude/kit.json` (`lint.enabled`, `tests.enabled`).
 Scope is the session's own changes: files edited through Claude's tools plus anything
-that changed on disk or in commits since SessionStart, deletions included. Tests are
+that changed on disk or in commits since SessionStart, deletions included. A file this
+session never edited, whose content is what another session's recorded edit in the same
+checkout left, is that session's to verify. Tests are
 picked per changed file: its own test file, `test_<module>*.py`, every test file whose
 imports reach it through the repo's own modules (so a test of B still runs when A, which B
 imports, changed), and for a `conftest.py` the test files beneath it. That set is capped at
@@ -10,6 +12,11 @@ imports, changed), and for a `conftest.py` the test files beneath it. That set i
 explicit paths. `tests.scope: "all"` runs every discovered test file instead, for a repo
 whose whole suite is cheap. Each pytest run gets an empty bytecode cache, so a stale `.pyc`
 can't stand in for the edited source.
+
+With `verification.enabled`, the repo's gates check what they claim. A Python file no gate
+claims gets related tests the same way (when `tests.enabled`), so it is only a gap when no
+test reaches it. Files matched by `verification.no_checks` (documentation, data, images)
+have nothing executable to run and are not reported, with or without gates.
 
 Failures (lint findings, failing tests or gates, a missing interpreter) block the stop.
 Gaps (files no gate covers, tests capped or excluded, nothing selected) are reported to
@@ -41,7 +48,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from gates import run_gates
+from gates import UNCOVERED, gate_paths, run_gates, uncovered_by_gates
 from kit_common import (
     CONFIG_RELPATH,
     changed_since,
@@ -56,8 +63,9 @@ from kit_common import (
     resolve_python,
     run,
     run_lint,
-    save_state,
     tail,
+    update_state,
+    written_by_others,
 )
 
 PYTEST_NO_TESTS = 5
@@ -335,11 +343,25 @@ def verify(root: Path, cfg: Dict[str, Any], changed: List[str],
     gate_deadline = deadline - reserve if deadline is not None else None
     failures, _ = run_gates(root, cfg, changed, deadline=gate_deadline)
     gaps: List[str] = []
-    if gated:
-        gaps = [f for f in failures if f.startswith("No configured gate covers")]
-        failures = [f for f in failures if f not in gaps]
+    # Python files that only related tests can check: every changed one without gates, and
+    # in a gated repo the ones no gate claims (they used to be reported as a bare gap).
+    test_targets = changed_py
+    # No runnable gate at all is a configuration failure (run_gates says so); don't also run
+    # tests and list every file as a gap next to it.
+    if gated and gate_paths(cfg):
+        failures = [f for f in failures if not f.startswith(UNCOVERED)]
+        uncovered = uncovered_by_gates(cfg, changed)
+        test_targets = [f for f in uncovered if f.endswith(".py")] if tcfg.get("enabled") else []
+        rest = [f for f in uncovered if f not in test_targets]
+        if rest:
+            gaps.append(UNCOVERED + ", ".join(rest))
+    elif gated:
+        failures = [f for f in failures if not f.startswith(UNCOVERED)]
+        test_targets = []
     else:
-        non_python = [f for f in changed if not f.endswith(".py")]
+        no_checks = cfg.get("verification", {}).get("no_checks") or []
+        non_python = [f for f in changed if not f.endswith(".py")
+                      and not any(fnmatch.fnmatchcase(f, p) for p in no_checks)]
         if non_python:
             gaps.append("No configured verification gates cover these non-Python files: "
                         + ", ".join(non_python))
@@ -347,7 +369,7 @@ def verify(root: Path, cfg: Dict[str, Any], changed: List[str],
         return failures, [], gaps
     python = resolve_python(cfg, root)
     if python is None:
-        if not (cfg.get("lint", {}).get("enabled") or (tcfg.get("enabled") and not gated)):
+        if not (cfg.get("lint", {}).get("enabled") or (tcfg.get("enabled") and test_targets)):
             return failures, [], gaps
         return failures + [f"No interpreter from `python` in .claude/kit.json exists here "
                 f"({cfg.get('python') or ['python3']}), "
@@ -356,9 +378,9 @@ def verify(root: Path, cfg: Dict[str, Any], changed: List[str],
     lint_out = lint_files(root, python, cfg, [f for f in changed_py if (root / f).is_file()], deadline=deadline)
     if lint_out:
         failures.append(f"Lint ({' '.join(cfg['lint'].get('args', []))}):\n{lint_out}")
-    if gated or not tcfg.get("enabled"):
+    if not tcfg.get("enabled") or not test_targets:
         return failures, [], gaps
-    tests, capped, excluded_count, untested = select_tests(root, changed_py, tcfg)
+    tests, capped, excluded_count, untested = select_tests(root, test_targets, tcfg)
     if untested:
         gaps.append(INCOMPLETE + "no test reaches " + ", ".join(untested))
     if capped:
@@ -388,6 +410,23 @@ def verdict_digest(root: Path, files: List[str]) -> str:
     return h.hexdigest()
 
 
+def _record_verdict(session_id: str, **digests: Optional[str]) -> bool:
+    """Write only the verdict keys, under the state lock. verify() can run for minutes, and
+    the state read before it is stale by then: saving that whole dict would drop the edits
+    post_edit recorded meanwhile. A None value removes the key. False: nothing was written."""
+    def change(state: Dict[str, Any]) -> None:
+        for key, value in digests.items():
+            if value is None:
+                state.pop(key, None)
+            else:
+                state[key] = value
+    try:
+        update_state(session_id, change)
+    except OSError:
+        return False
+    return True
+
+
 def hook_main() -> int:
     # The configured hook limit is 480 seconds; leave time for setup and reporting.
     deadline = time.monotonic() + 450
@@ -409,7 +448,8 @@ def hook_main() -> int:
             or cfg.get("verification", {}).get("enabled")):
         return 0
     state = load_state(session_id)
-    changed = changed_since(root, state.get("baseline", {}), state.get("edited", []))
+    changed = changed_since(root, state.get("baseline", {}), state.get("edited", []),
+                            others=lambda: written_by_others(root, session_id))
     if not changed:
         return 0
     digest = verdict_digest(root, changed)
@@ -420,23 +460,24 @@ def hook_main() -> int:
 
     failures, _, gaps = verify(root, cfg, changed, deadline=deadline)
     if not failures:
-        state.pop("failed_digest", None)
         if gaps:
-            state["gaps_digest"] = digest
-            save_state(session_id, state)
+            _record_verdict(session_id, gaps_digest=digest, failed_digest=None)
             emit({"systemMessage": "kit verify: nothing failed, but verification is INCOMPLETE. "
                   "Do not report this change as verified.\n" + "\n".join(gaps)})
             return 0
-        state["passed_digest"] = digest
-        save_state(session_id, state)
+        _record_verdict(session_id, passed_digest=digest, failed_digest=None)
         return 0
 
-    if data.get("stop_hook_active") and state.get("failed_digest") == digest:
+    retried = bool(data.get("stop_hook_active")) and state.get("failed_digest") == digest
+    # The retry guard needs the saved failed_digest. If it cannot be saved, a retry would never
+    # match it and blocking would repeat every turn, so any retry then ends the loop too.
+    recorded = retried or _record_verdict(session_id, failed_digest=digest)
+    if data.get("stop_hook_active") and (retried or not recorded):
+        also = ("\n\nAlso not covered:\n" + "\n".join(gaps)) if gaps else ""
         emit({"systemMessage": "kit verify: still failing after one retry; letting Claude stop. "
-              "Verification FAILED or INCOMPLETE. Report this explicitly; do not claim the task is verified."})
+              "Verification FAILED. Report this explicitly; do not claim the task is verified.\n\n"
+              + "\n\n".join(failures) + also})
         return 0
-    state["failed_digest"] = digest
-    save_state(session_id, state)
     note = ("\n\nAlso not covered, and not something to fix now:\n" + "\n".join(gaps)) if gaps else ""
     # additionalContext keeps Claude going like decision=block, but reads as feedback, not a hook error.
     emit({"hookSpecificOutput": {

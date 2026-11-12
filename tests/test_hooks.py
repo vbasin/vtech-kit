@@ -7,6 +7,7 @@ running the tests (`pip install pytest ruff`).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -19,9 +20,10 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "kit" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import kit_common  # noqa: E402
 from bash_guard import check, is_full_suite  # noqa: E402
 from gates import run_gates  # noqa: E402
-from kit_common import changed_since, snapshot  # noqa: E402
+from kit_common import changed_since, snapshot, written_by_others  # noqa: E402
 from stop_verify import find_tests  # noqa: E402
 
 PY_CANDIDATES = [".venv/bin/python"]
@@ -420,8 +422,12 @@ def test_stop_blocks_once_then_lets_go(repo: Path, data_dir: Path) -> None:
         "hookSpecificOutput"], "a new turn on the same failing diff still blocks once"
 
 
+    state_file = next(data_dir.rglob(f"{sid}.json"))
+    before = json.loads(state_file.read_text())
     again = hook("stop_verify.py", {**base, "stop_hook_active": True}, data_dir)
     assert "hookSpecificOutput" not in again and "still failing" in again["systemMessage"]
+    assert "assert 6 == 4" in again["systemMessage"], "the final message carries the failure"
+    assert json.loads(state_file.read_text()) == before, "a retry that ends records nothing"
 
     target.write_text("def double(x):\n    return x * 2\n")
     assert hook("stop_verify.py", {**base, "stop_hook_active": True}, data_dir) == {}
@@ -438,6 +444,113 @@ def test_preexisting_dirty_file_is_ignored(repo: Path, data_dir: Path) -> None:
     other = repo / "src" / "pkg" / "other.py"
     other.write_text("def other():\n    return 2\n")  # changed via Bash, not an Edit tool
     assert hook("stop_verify.py", {**base, "stop_hook_active": False}, data_dir) == {}
+
+
+def _session(repo: Path, data_dir: Path) -> dict:
+    base = {"session_id": str(uuid.uuid4()), "cwd": str(repo)}
+    hook("session_start.py", {**base, "source": "startup"}, data_dir)
+    return base
+
+
+def _tool_edit(base: dict, target: Path, text: str, data_dir: Path) -> None:
+    target.write_text(text)
+    hook("post_edit.py", {**base, "tool_name": "Edit", "tool_input": {"file_path": str(target)}}, data_dir)
+
+
+def _blocked(base: dict, data_dir: Path) -> bool:
+    return "hookSpecificOutput" in hook("stop_verify.py", {**base, "stop_hook_active": False}, data_dir)
+
+
+BROKEN = "def double(x):\n    return x * 3\n"
+
+
+def test_another_sessions_edit_is_left_to_that_session(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(theirs, target, BROKEN, data_dir)
+
+    assert not _blocked(mine, data_dir), "a session was held on a file only another session edited"
+    assert _blocked(theirs, data_dir), "the session that made the edit must still verify it"
+
+
+def test_a_change_no_session_recorded_after_anothers_edit_stays_in_scope(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(theirs, target, "def double(x):\n    return x * 2  # theirs\n", data_dir)
+    assert not _blocked(mine, data_dir)
+
+    recorded = target.stat()
+    target.write_text(BROKEN)  # written by a shell command: no session's edit tool saw it
+    os.utime(target, ns=(recorded.st_atime_ns, recorded.st_mtime_ns))  # even with the same timestamp
+    assert _blocked(mine, data_dir), "a write after the other session's edit could be this session's own"
+
+
+def test_anothers_edit_is_recognised_by_content_not_by_timestamp(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(theirs, target, BROKEN, data_dir)
+    recorded = target.stat()
+    os.utime(target, ns=(recorded.st_atime_ns, recorded.st_mtime_ns + 5_000_000_000))  # a checkout or stash rewrote it
+    assert not _blocked(mine, data_dir)
+
+
+def test_a_file_another_session_edited_and_someone_deleted_stays_in_scope(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(theirs, target, "def double(x):\n    return x * 2  # theirs\n", data_dir)
+    target.unlink()
+    assert _blocked(mine, data_dir), "a deletion cannot be attributed, and its tests must fail"
+
+
+def test_parallel_hooks_of_one_session_do_not_share_a_temp_file(
+        data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    replaced = []
+    monkeypatch.setattr(kit_common.os, "replace", lambda src, dst: replaced.append(Path(src).name))
+    monkeypatch.setattr(kit_common.os, "getpid", lambda: 111)
+    kit_common.save_state("s", {"edited": []})
+    monkeypatch.setattr(kit_common.os, "getpid", lambda: 222)
+    kit_common.save_state("s", {"edited": []})
+    assert len(set(replaced)) == 2, replaced
+    assert not list((data_dir / "state").glob("*.json")), "a temp file must never look like a session's state"
+
+
+def test_a_file_both_sessions_edited_is_still_checked(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(mine, target, "def double(x):\n    return x * 2  # mine\n", data_dir)
+    _tool_edit(theirs, target, BROKEN, data_dir)
+    assert _blocked(mine, data_dir), "this session edited the file too, so its content is still its concern"
+
+
+def test_another_sessions_committed_edit_is_left_to_that_session(repo: Path, data_dir: Path) -> None:
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    _tool_edit(theirs, repo / "src" / "pkg" / "mathx.py", BROKEN, data_dir)
+    commit(repo, "the other session commits its work")
+    assert not _blocked(mine, data_dir)
+
+
+def test_only_sessions_in_the_same_checkout_are_consulted(repo: Path, data_dir: Path, tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    mine, theirs = _session(repo, data_dir), _session(repo, data_dir)
+    target = repo / "src" / "pkg" / "mathx.py"
+    _tool_edit(theirs, target, BROKEN, data_dir)
+    content = hashlib.sha256(target.read_bytes()).hexdigest()
+
+    state = data_dir / "state"
+    elsewhere = json.loads((state / f"{theirs['session_id']}.json").read_text())
+    elsewhere["baseline"]["root"] = str(tmp_path / "another-checkout")
+    elsewhere["edited_digest"] = {"src/pkg/other.py": "0" * 64}
+    (state / "elsewhere.json").write_text(json.dumps(elsewhere))
+    (state / "torn.json").write_text("{not json")
+    (state / "old-format.json").write_text(
+        json.dumps({"baseline": {"root": str(repo)}, "edited": ["src/pkg/other.py"]}))
+    (state / "wrong-types.json").write_text(json.dumps(
+        {"baseline": {"root": str(repo)}, "edited_digest": {"x.py": 1, "y.py": True, "z.py": ""}}))
+
+    assert written_by_others(repo, mine["session_id"]) == {"src/pkg/mathx.py": {content}}
+    assert written_by_others(repo, theirs["session_id"]) == {}, "a session does not read its own record"
 
 
 def test_post_edit_reports_lint_errors(repo: Path, data_dir: Path) -> None:
@@ -763,6 +876,183 @@ def test_language_neutral_gate_pass_fail_and_uncovered(repo: Path, data_dir: Pat
     assert result.returncode == 1 and "Gate typescript failed (exit 3)" in result.stdout
     result = manual(repo, "README.md", data_dir=data_dir)
     assert result.returncode == 1 and "No configured gate covers" in result.stdout
+
+
+GATE_OK = {"name": "ts", "paths": ["src/*.ts"], "argv": [sys.executable, "-c", "import sys; sys.exit(0)"]}
+
+
+def test_gated_repo_tests_a_python_file_no_gate_claims(repo: Path, data_dir: Path) -> None:
+    # Gates and related tests together: a .py no gate claims runs its related tests instead of
+    # being reported as a bare gap (the gap fired on every session in a partly gated repo).
+    (repo / "src/app.ts").write_text("x\n")
+    set_config(repo, verification={"enabled": True, "gates": [GATE_OK]})
+    result = manual(repo, "src/app.ts", "src/pkg/mathx.py", data_dir=data_dir)
+    assert result.returncode == 0, result.stdout
+    assert "tests/test_mathx.py" in result.stdout and "No configured gate covers" not in result.stdout
+    (repo / "src/pkg/mathx.py").write_text("def double(x):\n    return x * 3\n")
+    result = manual(repo, "src/pkg/mathx.py", data_dir=data_dir)
+    assert result.returncode == 1 and "kit verify: FAILED" in result.stdout
+    result = manual(repo, "tests/test_unrelated.py", data_dir=data_dir)      # a changed test runs itself
+    assert result.returncode == 0 and "tests/test_unrelated.py" in result.stdout
+
+
+def test_gated_repo_python_file_no_test_reaches_is_still_a_gap(repo: Path, data_dir: Path) -> None:
+    set_config(repo, verification={"enabled": True, "gates": [GATE_OK]})
+    result = manual(repo, "src/pkg/other.py", data_dir=data_dir)
+    assert result.returncode == 1 and "no test reaches src/pkg/other.py" in result.stdout
+    set_config(repo, tests={"enabled": False})                                  # no tests: a plain gap
+    result = manual(repo, "src/pkg/mathx.py", data_dir=data_dir)
+    assert result.returncode == 1 and "No configured gate covers: src/pkg/mathx.py" in result.stdout
+
+
+def test_no_checks_files_are_not_gaps(repo: Path, data_dir: Path) -> None:
+    (repo / "src/app.ts").write_text("x\n")
+    (repo / "docs").mkdir()
+    (repo / "docs/note.md").write_text("n\n")
+    set_config(repo, verification={"enabled": True, "gates": [GATE_OK], "no_checks": ["docs/**", "*.md"]})
+    result = manual(repo, "src/app.ts", "docs/note.md", "README.md", data_dir=data_dir)
+    assert result.returncode == 0, result.stdout
+    set_config(repo, verification={"no_checks": ["**/*.md"]})                  # needs a slash: misses root
+    result = manual(repo, "src/app.ts", "README.md", data_dir=data_dir)
+    assert result.returncode == 1 and "No configured gate covers: README.md" in result.stdout
+    (repo / "data.csv").write_text("a\n")
+    result = manual(repo, "data.csv", data_dir=data_dir)                        # not declared: still a gap
+    assert result.returncode == 1 and "No configured gate covers: data.csv" in result.stdout
+
+
+def test_gated_repo_without_runnable_gates_reports_only_the_config(repo: Path, data_dir: Path) -> None:
+    set_config(repo, verification={"enabled": True, "gates": [{"name": "broken", "paths": ["src/**"]}]})
+    result = manual(repo, "src/pkg/mathx.py", data_dir=data_dir)
+    assert result.returncode == 1 and "invalid gate" in result.stdout
+    assert "tests run: none" in result.stdout and "No configured gate covers" not in result.stdout
+
+
+def test_no_checks_applies_without_gates(repo: Path, data_dir: Path) -> None:
+    (repo / "docs").mkdir()
+    (repo / "docs/note.md").write_text("n\n")
+    set_config(repo, verification={"no_checks": ["*.md"]})
+    result = manual(repo, "src/pkg/mathx.py", "docs/note.md", data_dir=data_dir)
+    assert result.returncode == 0 and "non-Python" not in result.stdout, result.stdout
+
+
+def test_parallel_edit_hooks_keep_every_record(repo: Path, data_dir: Path) -> None:
+    # Parallel tool calls run post_edit hooks of one session at once; each must keep its record.
+    names = [f"src/pkg/f{i}.py" for i in range(12)]
+    for n in names:
+        (repo / n).write_text("x = 1\n")
+    env = {"CLAUDE_PLUGIN_DATA": str(data_dir), "PATH": "/usr/bin:/bin"}
+    procs = [subprocess.Popen([sys.executable, str(SCRIPTS / "post_edit.py")], stdin=subprocess.PIPE,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True, env=env)
+             for _ in names]
+    for proc, n in zip(procs, names):
+        proc.stdin.write(json.dumps({"session_id": "par", "cwd": str(repo),
+                                     "tool_input": {"file_path": str(repo / n)}}))
+        proc.stdin.close()
+    for proc in procs:
+        proc.wait(timeout=60)
+    state = json.loads(next((data_dir).rglob("par.json")).read_text())
+    assert sorted(state["edited"]) == sorted(names) and len(state["edited_digest"]) == len(names)
+
+
+def test_state_update_without_flock_support_still_records(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Some NFS/FUSE mounts refuse flock; the edit must still be recorded, just unserialised.
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+
+    class NoFlock:
+        LOCK_EX, LOCK_UN = 2, 8
+
+        @staticmethod
+        def flock(fd: int, op: int) -> None:
+            raise OSError(37, "No locks available")
+
+    monkeypatch.setattr(kit_common, "fcntl", NoFlock)
+    kit_common.update_state("nolock", lambda st: st.setdefault("edited", []).append("a.py"))
+    assert kit_common.load_state("nolock")["edited"] == ["a.py"]
+
+
+def test_prune_keeps_a_live_sessions_lock(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Opening a lock for append never moves its mtime; update_state must, or a session older
+    # than the TTL would lose its lock while live and its writers would stop serialising.
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    state = data_dir / "state"
+    old = kit_common.time.time() - kit_common.STATE_TTL_S - 60
+    kit_common.update_state("live", lambda st: st.update(edited=[]))
+    os.utime(state / "live.lock", (old, old))
+    kit_common.update_state("live", lambda st: st["edited"].append("a.py"))
+    stale = state / "gone.lock"
+    stale.write_text("")
+    os.utime(stale, (old, old))
+    kit_common.prune_old_state()
+    assert (state / "live.lock").exists() and (state / "live.json").exists()
+    assert not stale.exists()
+
+
+@pytest.mark.parametrize("by_fd", [True, False])
+def test_a_failed_lock_touch_keeps_the_update(
+        data_dir: Path, monkeypatch: pytest.MonkeyPatch, by_fd: bool) -> None:
+    # The touch is only a TTL hint for pruning; it must never cost the edit record.
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    touched = []
+
+    def utime(target: object, *a: object, **k: object) -> None:
+        touched.append(target)
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(kit_common.os, "supports_fd", {utime} if by_fd else set())
+    monkeypatch.setattr(kit_common.os, "utime", utime)
+    kit_common.update_state("touch", lambda st: st.setdefault("edited", []).append("a.py"))
+    assert kit_common.load_state("touch")["edited"] == ["a.py"]
+    assert len(touched) == 1 and isinstance(touched[0], int) is by_fd
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_stop_retries_once_when_a_failure_cannot_be_recorded(
+        repo: Path, data_dir: Path, monkeypatch: pytest.MonkeyPatch, retry: bool) -> None:
+    # Without a saved failed_digest the retry guard never matches. Claude still gets the first
+    # chance to fix it; on the retry Stop lets it stop instead of blocking every turn.
+    import stop_verify
+    monkeypatch.setattr(stop_verify, "_record_verdict", lambda *a, **k: False)
+    monkeypatch.setattr(stop_verify, "verify", lambda *a, **k: (["tests failed"], [], ["a gap"]))
+    monkeypatch.setattr(stop_verify, "changed_since", lambda *a, **k: ["src/pkg/mathx.py"])
+    monkeypatch.setattr(stop_verify, "load_config", lambda *a, **k: {"lint": {"enabled": True}})
+    monkeypatch.setattr(stop_verify, "read_input",
+                        lambda: {"session_id": "nostate", "cwd": str(repo), "stop_hook_active": retry})
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    out = []
+    monkeypatch.setattr(stop_verify, "emit", out.append)
+    assert stop_verify.hook_main() == 0 and len(out) == 1, out
+    text = out[0]["systemMessage"] if retry else out[0]["hookSpecificOutput"]["additionalContext"]
+    assert "tests failed" in text and "a gap" in text
+    assert ("FAILED" in text) is retry
+
+
+def test_stop_verdict_keeps_edits_recorded_during_verify(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Stop reads state, verifies for minutes, then records a verdict. Edits post_edit recorded
+    # meanwhile must survive, and only the verdict keys may change.
+    import stop_verify
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    kit_common.save_state("v", {"edited": ["a.py"], "failed_digest": "old"})
+    stale = kit_common.load_state("v")
+    kit_common.update_state("v", lambda st: st["edited"].append("b.py"))
+    stop_verify._record_verdict("v", passed_digest="d1", failed_digest=None)
+    state = kit_common.load_state("v")
+    assert state["edited"] == ["a.py", "b.py"] and state["passed_digest"] == "d1"
+    assert "failed_digest" not in state and stale["edited"] == ["a.py"]
+
+
+def test_invalid_no_checks_is_rejected(repo: Path, data_dir: Path) -> None:
+    set_config(repo, verification={"enabled": True, "gates": [GATE_OK], "no_checks": "docs/**"})
+    result = manual(repo, "src/pkg/mathx.py", data_dir=data_dir)
+    assert result.returncode == 2 and "no_checks must be a list of strings" in result.stdout
+
+
+def test_stop_is_silent_for_a_gated_repo_change_its_tests_verify(repo: Path, data_dir: Path) -> None:
+    set_config(repo, verification={"enabled": True, "gates": [GATE_OK], "no_checks": ["*.md"]})
+    base = {"session_id": "gated-related", "cwd": str(repo)}
+    hook("session_start.py", base, data_dir)
+    (repo / "src/pkg/mathx.py").write_text("def double(x):\n    return x + x\n")
+    (repo / "NOTES.md").write_text("why\n")
+    assert hook("stop_verify.py", base, data_dir) == {}
 
 
 def test_gate_command_does_not_use_shell_and_cannot_escape_repo(repo: Path, data_dir: Path) -> None:
