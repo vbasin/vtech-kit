@@ -262,6 +262,9 @@ def update_state(session_id: str, change: Callable[[Dict[str, Any]], None]) -> N
             except OSError:
                 pass  # a filesystem without flock: update unserialised, as without fcntl
         try:
+            # Opening for append never moves mtime; touch it so it marks the last update and
+            # prune_old_state can age locks like the state they guard.
+            os.utime(lock_path)
             state = load_state(session_id)
             change(state)
             save_state(session_id, state)
@@ -272,19 +275,12 @@ def update_state(session_id: str, change: Callable[[Dict[str, Any]], None]) -> N
 
 def prune_old_state() -> None:
     cutoff = time.time() - STATE_TTL_S
-    # .tmp: a writer that crashed between write and replace. A .lock's mtime never moves, so
-    # it goes only with its session's state: unlinking a live session's lock would let two
-    # writers each hold a lock on a different file.
-    for entry in [*state_dir().glob("*.json"), *state_dir().glob("*.tmp")]:
+    # .tmp: a writer that crashed between write and replace; .lock: update_state's lock
+    # files, whose mtime update_state refreshes on every update.
+    for entry in [*state_dir().glob("*.json"), *state_dir().glob("*.tmp"), *state_dir().glob("*.lock")]:
         try:
             if entry.stat().st_mtime < cutoff:
                 entry.unlink()
-        except OSError:
-            pass
-    for lock in state_dir().glob("*.lock"):
-        try:
-            if not lock.with_suffix(".json").exists() and lock.stat().st_mtime < cutoff:
-                lock.unlink()
         except OSError:
             pass
 

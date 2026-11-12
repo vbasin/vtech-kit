@@ -410,10 +410,10 @@ def verdict_digest(root: Path, files: List[str]) -> str:
     return h.hexdigest()
 
 
-def _record_verdict(session_id: str, **digests: Optional[str]) -> None:
+def _record_verdict(session_id: str, **digests: Optional[str]) -> bool:
     """Write only the verdict keys, under the state lock. verify() can run for minutes, and
     the state read before it is stale by then: saving that whole dict would drop the edits
-    post_edit recorded meanwhile. A None value removes the key."""
+    post_edit recorded meanwhile. A None value removes the key. False: nothing was written."""
     def change(state: Dict[str, Any]) -> None:
         for key, value in digests.items():
             if value is None:
@@ -423,7 +423,8 @@ def _record_verdict(session_id: str, **digests: Optional[str]) -> None:
     try:
         update_state(session_id, change)
     except OSError:
-        pass
+        return False
+    return True
 
 
 def hook_main() -> int:
@@ -471,7 +472,13 @@ def hook_main() -> int:
         emit({"systemMessage": "kit verify: still failing after one retry; letting Claude stop. "
               "Verification FAILED or INCOMPLETE. Report this explicitly; do not claim the task is verified."})
         return 0
-    _record_verdict(session_id, failed_digest=digest)
+    if not _record_verdict(session_id, failed_digest=digest):
+        # The retry guard above needs failed_digest. Without it, blocking would repeat every
+        # turn, so report the failure once and let Claude stop.
+        emit({"systemMessage": "kit verify: verification FAILED and its state could not be saved; "
+              "letting Claude stop. Report this explicitly; do not claim the task is verified.\n\n"
+              + "\n\n".join(failures)})
+        return 0
     note = ("\n\nAlso not covered, and not something to fix now:\n" + "\n".join(gaps)) if gaps else ""
     # additionalContext keeps Claude going like decision=block, but reads as feedback, not a hook error.
     emit({"hookSpecificOutput": {

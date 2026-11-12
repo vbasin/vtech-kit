@@ -964,18 +964,37 @@ def test_state_update_without_flock_support_still_records(data_dir: Path, monkey
 
 
 def test_prune_keeps_a_live_sessions_lock(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A lock's mtime never moves; unlinking a live session's lock would split its writers.
+    # Opening a lock for append never moves its mtime; update_state must, or a session older
+    # than the TTL would lose its lock while live and its writers would stop serialising.
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
-    kit_common.update_state("live", lambda st: st.update(edited=[]))
     state = data_dir / "state"
-    orphan = state / "gone.lock"
-    orphan.write_text("")
     old = kit_common.time.time() - kit_common.STATE_TTL_S - 60
-    for lock in (state / "live.lock", orphan):
-        os.utime(lock, (old, old))
+    kit_common.update_state("live", lambda st: st.update(edited=[]))
+    os.utime(state / "live.lock", (old, old))
+    kit_common.update_state("live", lambda st: st["edited"].append("a.py"))
+    stale = state / "gone.lock"
+    stale.write_text("")
+    os.utime(stale, (old, old))
     kit_common.prune_old_state()
     assert (state / "live.lock").exists() and (state / "live.json").exists()
-    assert not orphan.exists()
+    assert not stale.exists()
+
+
+def test_stop_lets_claude_stop_when_a_failure_cannot_be_recorded(
+        repo: Path, data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without a saved failed_digest the retry guard never matches; blocking would repeat forever.
+    import stop_verify
+    monkeypatch.setattr(stop_verify, "_record_verdict", lambda *a, **k: False)
+    monkeypatch.setattr(stop_verify, "verify", lambda *a, **k: (["tests failed"], [], []))
+    monkeypatch.setattr(stop_verify, "changed_since", lambda *a, **k: ["src/pkg/mathx.py"])
+    monkeypatch.setattr(stop_verify, "load_config", lambda *a, **k: {"lint": {"enabled": True}})
+    monkeypatch.setattr(stop_verify, "read_input", lambda: {"session_id": "nostate", "cwd": str(repo)})
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    out = []
+    monkeypatch.setattr(stop_verify, "emit", out.append)
+    assert stop_verify.hook_main() == 0
+    assert len(out) == 1 and "hookSpecificOutput" not in out[0], out
+    assert "FAILED" in out[0]["systemMessage"] and "tests failed" in out[0]["systemMessage"]
 
 
 def test_stop_verdict_keeps_edits_recorded_during_verify(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
