@@ -980,6 +980,24 @@ def test_prune_keeps_a_live_sessions_lock(data_dir: Path, monkeypatch: pytest.Mo
     assert not stale.exists()
 
 
+@pytest.mark.parametrize("by_fd", [True, False])
+def test_a_failed_lock_touch_keeps_the_update(
+        data_dir: Path, monkeypatch: pytest.MonkeyPatch, by_fd: bool) -> None:
+    # The touch is only a TTL hint for pruning; it must never cost the edit record.
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data_dir))
+    touched = []
+
+    def utime(target: object, *a: object, **k: object) -> None:
+        touched.append(target)
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(kit_common.os, "supports_fd", {utime} if by_fd else set())
+    monkeypatch.setattr(kit_common.os, "utime", utime)
+    kit_common.update_state("touch", lambda st: st.setdefault("edited", []).append("a.py"))
+    assert kit_common.load_state("touch")["edited"] == ["a.py"]
+    assert len(touched) == 1 and isinstance(touched[0], int) is by_fd
+
+
 @pytest.mark.parametrize("retry", [False, True])
 def test_stop_retries_once_when_a_failure_cannot_be_recorded(
         repo: Path, data_dir: Path, monkeypatch: pytest.MonkeyPatch, retry: bool) -> None:
@@ -998,7 +1016,7 @@ def test_stop_retries_once_when_a_failure_cannot_be_recorded(
     assert stop_verify.hook_main() == 0 and len(out) == 1, out
     text = out[0]["systemMessage"] if retry else out[0]["hookSpecificOutput"]["additionalContext"]
     assert "tests failed" in text and "a gap" in text
-    assert ("FAILED" in text) if retry else ("hookSpecificOutput" in out[0])
+    assert ("FAILED" in text) is retry
 
 
 def test_stop_verdict_keeps_edits_recorded_during_verify(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
